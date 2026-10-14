@@ -1,0 +1,52 @@
+clusterName: REPLACE_WITH_TERRAFORM_OUTPUT_CLUSTER_NAME
+region: eu-west-1
+vpcId: REPLACE_WITH_TERRAFORM_OUTPUT_VPC_ID
+
+replicaCount: 2
+configureDefaultAffinity: true
+defaultTargetType: ip
+defaultLoadBalancerScheme: internal
+enableShield: false
+enableWaf: false
+enableWafv2: false
+enableServiceMutatorWebhook: false
+
+serviceAccount:
+  create: true
+  name: aws-load-balancer-controller
+  annotations:
+    eks.amazonaws.com/role-arn: REPLACE_WITH_TERRAFORM_OUTPUT_AWS_LOAD_BALANCER_CONTROLLER_ROLE_ARN
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+livenessProbe:
+  failureThreshold: 3
+  httpGet:
+    path: /healthz
+    port: 61779
+    scheme: HTTP
+  initialDelaySeconds: 30
+  timeoutSeconds: 10
+readinessProbe:
+  failureThreshold: 3
+  httpGet:
+    path: /readyz
+    port: 61779
+    scheme: HTTP
+  initialDelaySeconds: 10
+  timeoutSeconds: 10
+
+podSecurityContext:
+  fsGroup: 65534
+securityContext:
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  seccompProfile:
+    type: RuntimeDefault

@@ -1,20 +1,21 @@
 # Session state (update after each verified working session)
 
-| Field                                    | Value                                                                                                                             |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Last reviewed                            | 2026-10-14 (Stage 1B Terraform source; local validation only)                                                                     |
-| Last completed infrastructure stage/wave | Stage 1A reported by owner as deployed, validated and merged; not independently queried in this session                           |
-| Current task                             | Stage 1B Terraform source implemented and locally validated; no AWS plan/apply performed                                          |
-| Next approved action                     | Human verifies account, Region, CIDR, EKS/add-on support, quotas and RDS orderability; then reviews a saved plan before any apply |
-| Scenario progress                        | 0 of 43 done (catalogue retained)                                                                                                 |
+| Field                                    | Value                                                                                                                              |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Last reviewed                            | 2026-10-14 (Stage 2 platform source; local validation only)                                                                        |
+| Last completed infrastructure stage/wave | Stage 1B reported by owner as complete, deployed, validated and merged; not independently queried in this session                  |
+| Current task                             | Stage 2 platform source implemented and locally validated; no AWS or Kubernetes mutations performed                                |
+| Next approved action                     | Human reviews/applies the saved Stage 2 IAM plan, resolves private GitOps identifiers, then follows the platform bootstrap runbook |
+| Scenario progress                        | 0 of 43 done (catalogue retained)                                                                                                  |
 
 ## Confirmed baseline facts
 - v2 skeleton and v3 targeted safety overlay combined into a **new starter copy**.
 - Four lifecycle launchers deliberately exit 78; cloud lifecycle functionality is NOT implemented.
 - Stage 1A completion is owner-reported; it was not re-queried during this local implementation session.
-- Stage 1B Terraform source exists under `infra/terraform/environments/lab` and the `network`, `eks` and `rds` modules; it is NOT deployed.
-- No AWS API, Kubernetes API, billing, deployment, apply or destroy operations were executed in this session.
-- Terraform validation was backend-disabled; no live infrastructure readiness or teardown has been proven.
+- Stage 1B completion/deployment is owner-reported; it was not independently queried in this session.
+- Stage 2 source adds the platform IAM module, Argo CD/Helm values, GitOps Applications, namespaces, RBAC, quotas, gp3 storage and External Secrets configuration; none was installed or applied in this session.
+- No AWS API, Kubernetes API, billing, deployment, Terraform apply/destroy, kubectl mutation, Helm install or Git push was executed in this session.
+- Terraform validation was backend-disabled. No live platform readiness, SecretStore synchronization, ALB provisioning or teardown has been proven.
 
 ## Accepted decisions since last update
 - **No locked architecture decisions changed by the consolidation.**
@@ -45,3 +46,11 @@ Raw evidence must stay in `.private-evidence/`. Chargeable resource inventory mu
 - Live EKS/RDS version and add-on support, quotas, CIDR overlap, costs, saved plan review, deployment and teardown remain unverified and block first apply.
 - Exact permanent ECR repository existence/ownership was not checked; verify it before Stage 1C image publishing. This change adds no ECR resources.
 - EKS access input is `cluster_admin_principal_arn`, validated for an IAM user or role ARN in the expected account; the access policy remains cluster-admin and creator bootstrap admin remains disabled. Backend-disabled validation passed after this correction; no AWS writes were performed.
+
+## Stage 2 local checks (2026-10-14)
+- `terraform fmt -recursive infra/terraform`: passed.
+- `bash scripts/check-all.sh`: passed; shell checks, Gitleaks, all 43 scenario IDs, offline platform YAML/IAM invariants, and backend-disabled validation of permanent, fixture and lab roots passed.
+- `scripts/validate-platform.py`: passed for 19 YAML files; this checks syntax, IAM policy JSON/size/tag guards, StorageClass parity, namespace/AppProject scope, disabled optional integrations and manual secret sync, not Kubernetes API schemas or Helm chart rendering.
+- Helm, kubectl, kubeconform, kube-linter and Trivy are unavailable in this environment; chart render, Kubernetes API validation and IaC scan were not run.
+- Stage 1B deployment and cluster state are owner-reported; no AWS or Kubernetes reads were made to independently confirm them.
+- Human must review/apply the Stage 2 IAM plan, supply exact Terraform outputs through an approved private configuration path, verify repository privacy/access, and manually bootstrap before controller Applications can sync. The sample GitOps values intentionally retain `REPLACE_WITH_TERRAFORM_OUTPUT_*` markers until then.
