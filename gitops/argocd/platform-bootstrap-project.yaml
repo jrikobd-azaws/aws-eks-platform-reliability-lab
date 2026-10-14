@@ -17,6 +17,8 @@ spec:
     - server: https://kubernetes.default.svc
       namespace: kube-system
   namespaceResourceWhitelist:
+    - group: ""
+      kind: ServiceAccount
     - group: argoproj.io
       kind: Application
     - group: argoproj.io
