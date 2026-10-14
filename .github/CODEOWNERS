@@ -1,0 +1,7 @@
+# Replace TBD-owner with your GitHub username, then enable branch protection requiring code-owner review.
+/docs/DECISIONS.md                 @TBD-owner
+/.github/copilot-instructions.md   @TBD-owner
+/.github/CODEOWNERS                @TBD-owner
+/scripts/                          @TBD-owner
+/scenarios/SCENARIO_INDEX.md       @TBD-owner
+/docs/access-model.md              @TBD-owner

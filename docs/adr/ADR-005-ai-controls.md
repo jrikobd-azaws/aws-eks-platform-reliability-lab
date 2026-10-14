@@ -1,0 +1,2 @@
+# ADR-005 Controls for AI-assisted implementation
+Status: Accepted. Instructions alone cannot guarantee AI behaviour. Controls: plan->approve->implement->validate->record cycle; plan-only AWS profile for agents; human-run apply/lifecycle scripts with a human gate variable; CODEOWNERS and branch protection on decisions, instructions and scripts; automated checks (scripts/check-all.sh and CI); session-state file to avoid reliance on chat memory.

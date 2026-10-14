@@ -1,0 +1,3 @@
+title = "eks-lab gitleaks"
+[extend]
+useDefault = true

@@ -1,0 +1,54 @@
+CONSOLIDATED v3 STARTER VALIDATION — LOCAL ONLY — 2026-10-14
+Original v2 files preserved by path: 63 of 63
+Consolidated repository files before validation report: 71
+New v3 files and reconciled docs: available
+No AWS, Kubernetes, Terraform apply/destroy, Docker or GitHub operations performed.
+Tool availability: bash=found, python3=found, git=found, shellcheck=missing, gitleaks=missing, terraform=missing, tflint=missing, helm=missing, aws=missing, kubectl=missing
+All scenario IDs retained; zero reported completed.
+
+LOCAL TEST COMMANDS AND ACTUAL RESULTS
+$ python3 scripts/check-v3-patch.py
+exit=0
+PASS: blocked launchers have valid syntax and return 78; no cloud calls.
+$ python3 scripts/check_scenarios.py
+exit=0
+scenarios=43 done=0
+scenario index OK
+$ bash scripts/check-all.sh
+exit=78
+BLOCKED: missing required tool shellcheck
+$ bash scripts/start.sh
+exit=78
+BLOCKED: start has not been implemented and live-validated under the v3 contract.
+$ bash scripts/stop.sh
+exit=78
+BLOCKED: stop has not been implemented and live-validated under the v3 contract.
+$ bash scripts/validate-up.sh
+exit=78
+BLOCKED: validate-up has not been implemented and live-validated under the v3 contract.
+$ bash scripts/validate-down.sh
+exit=78
+BLOCKED: validate-down has not been implemented and live-validated under the v3 contract.
+$ bash scripts/preflight.sh
+exit=78
+BLOCKED: legacy v2 preflight checks were insufficient; implement exact account/cluster ARN/endpoint/backend verification with mocks before enabling.
+$ bash scripts/inject/_TEMPLATE.sh
+exit=78
+BLOCKED: incident inject template has no validated safety design or concrete scenario commands.
+$ bash scripts/recover/_TEMPLATE.sh
+exit=78
+BLOCKED: incident recover template has no validated safety design or concrete scenario commands.
+
+VALIDATION LIMITATIONS
+check-all.sh BLOCKED with exit 78 because ShellCheck is not installed in this test environment (and Gitleaks/Terraform/Helm also absent). This is not a passing full lint/security/cloud gate.
+No proof of CI execution, AWS-side inventory, billing, safe EKS teardown, two-image app, Helm/Argo release or scenario recovery.
+Before any actual cloud writes, owner must review the v3 safety contract, approve exact target and run required tests and staged safety proof.
+
+Testing strategy integration — 2026-10-14:
+- Added docs/TESTING-STRATEGY.md with mandatory, stage-scoped ZenPharma/DevSecOps CI quality gates plus FastAPI/Python/RDS integration requirements.
+- Updated START-HERE, IMPLEMENTATION-GUIDE, ROADMAP, Copilot instructions and TRAINING-MAP with references.
+- No application tests, SonarCloud/Trivy workflows, IAM actions or AWS resources were implemented or executed in this documentation change.
+- check-v3-patch.py: PASS (four launchers still return 78)
+- check_scenarios.py: PASS (43 planned, 0 completed)
+- check-all.sh: BLOCKED / exit 78 (ShellCheck missing in this execution environment)
+- Full CI, SonarCloud, Trivy, EKS, application, Helm, and live teardown: NOT EXECUTED.

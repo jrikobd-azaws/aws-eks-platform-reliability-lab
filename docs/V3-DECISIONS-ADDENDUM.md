@@ -1,0 +1,2 @@
+# Decision addendum — append after human review
+All 43 scenarios remain required, with IDs and waves unchanged. v3 contract overrides unsafe v2 assumptions. Lifecycle launchers are blocked pending target verification, ownership inventory, failure handling, tests and human-approved disposable proof. Foundation work precedes app/portfolio gates. Versions require re-verification. Agent identity is least privilege. Native Helm release exercises use their own sandbox.

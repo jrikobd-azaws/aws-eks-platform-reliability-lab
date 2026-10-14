@@ -1,0 +1,39 @@
+# Local Terraform state, plans and state backends
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+destroy.tfplan
+*.tfvars
+!*.tfvars.example
+.terraform.tfstate.lock.info
+crash.log
+crash.*.log
+
+# Credentials, secrets and local contexts
+.env
+.env.*
+!.env.example
+scripts/config.env
+kubeconfig*
+*.pem
+*.key
+*.p12
+*.pfx
+*.kubeconfig
+
+# Raw or unreviewed evidence, owned-resource inventory and site output
+.private-evidence/
+.runtime-inventory/
+docs/evidence/raw/
+site/
+
+# Python, editors and operating-system metadata
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.coverage
+.DS_Store
+.vscode/*.local.json

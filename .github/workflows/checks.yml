@@ -1,0 +1,37 @@
+name: safety-checks
+on: [pull_request, push]
+permissions:
+  contents: read
+jobs:
+  local-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: ShellCheck prerequisite
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+      - name: v3 launchers are still blocked
+        run: python3 scripts/check-v3-patch.py
+      - name: Shell syntax and ShellCheck (all shell scripts)
+        run: |
+          find scripts -type f -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
+          find scripts -type f -name '*.sh' -print0 | xargs -0 -r shellcheck -x -P SCRIPTDIR
+      - name: Catalogue (43 scenarios)
+        run: python3 scripts/check_scenarios.py
+      - name: Gitleaks secret scan
+        uses: gitleaks/gitleaks-action@v2  # TODO: pin to reviewed commit SHA
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Block release if Terraform files lack configured gates
+        run: |
+          if find infra/terraform -type f -name '*.tf' -print -quit | grep -q .; then
+            echo 'BLOCKED: add Terraform per-root fmt/validate/lint/security checks before merging IaC'
+            exit 1
+          fi
+      - name: Block release if Helm chart lacks validation gates
+        run: |
+          if test -f app/helm/Chart.yaml; then
+            echo 'BLOCKED: add pinned Helm lint/render CI before merging chart'
+            exit 1
+          fi
