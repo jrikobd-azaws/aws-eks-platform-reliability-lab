@@ -40,8 +40,7 @@ jobs:
           terraform_version: "1.15.3"
       - name: Terraform fmt and validate (local static checks only)
         run: |
-          terraform -chdir=infra/terraform/permanent fmt -check -diff -recursive
-          terraform -chdir=infra/terraform/environments/lab fmt -check -diff -recursive
+          terraform fmt -check -diff -recursive infra/terraform
           terraform -chdir=infra/terraform/permanent init -backend=false -input=false
           terraform -chdir=infra/terraform/permanent validate
           terraform -chdir=infra/terraform/environments/lab init -backend=false -input=false
