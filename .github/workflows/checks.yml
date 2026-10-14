@@ -16,12 +16,12 @@ jobs:
       - name: Set up Python for Stage 0 safety tests
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
       - name: Python Stage 0 safety tests
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install pytest boto3
-          pytest -q tests/labops
+          python3 -m pytest -q tests/labops
       - name: Shell syntax and ShellCheck (all shell scripts)
         run: |
           find scripts -type f -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
@@ -29,7 +29,7 @@ jobs:
       - name: Catalogue (43 scenarios)
         run: python3 scripts/check_scenarios.py
       - name: Gitleaks secret scan
-        uses: gitleaks/gitleaks-action@v2  # TODO: pin to reviewed commit SHA
+        uses: gitleaks/gitleaks-action@v2 # TODO: pin to reviewed commit SHA
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Block release if Terraform files lack configured gates
