@@ -4,14 +4,14 @@ metadata:
   name: platform-root
   namespace: argocd
 spec:
-  project: default
+  project: platform-bootstrap
   source:
     repoURL: https://github.com/jrikobd-azaws/aws-eks-platform-reliability-lab.git
     targetRevision: main
     path: gitops/platform
   destination:
     server: https://kubernetes.default.svc
-    namespace: default
+    namespace: argocd
   syncPolicy:
     automated:
       prune: false

@@ -173,3 +173,23 @@ Keep raw command output and resource IDs private in `.private-evidence/`; record
 7. Verify captured EKS, NAT/EIP, ENI, load balancer, target group, EBS, RDS, Secrets Manager and IAM resource IDs absent using successful service API reads. Update session state with observed facts only.
 
 For the eventual application cleanup, remove its Ingress and PVC resources before removing the controllers or StorageClass. The full EKS lifecycle scripts remain blocked until these steps, partial-failure recovery and cluster-unavailable cleanup have been tested and separately approved.
+## Approved public GitOps identifiers
+
+For this disposable, single-account portfolio lab, the operator has
+approved publishing only the following non-secret identifiers:
+
+- EKS cluster name
+- VPC ID
+- AWS Load Balancer Controller IAM role ARN
+- Dev secrets-reader IAM role ARN
+- RDS Secrets Manager secret ARN
+
+This exception applies only to the approved lab GitOps configuration.
+It does not authorise publishing credentials, secret values, access
+keys, tokens, Terraform state, or private configuration.
+
+IAM permissions, IRSA trust restrictions, protected GitHub workflows,
+manual deployment approvals and the V3 safety contract remain in force.
+
+The publication of these identifiers exposes infrastructure metadata
+and is not a general production security recommendation.
