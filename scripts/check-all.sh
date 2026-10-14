@@ -10,6 +10,10 @@ shellcheck -x -P SCRIPTDIR "${scripts[@]}"
 python3 scripts/check-v3-patch.py
 python3 scripts/check_scenarios.py
 gitleaks dir --no-banner .
+if [[ -f gitops/platform/kustomization.yaml ]]; then
+  python3 -c 'import yaml' >/dev/null 2>&1 || { printf '%s\n' 'BLOCKED: PyYAML is required for platform manifest validation.' >&2; exit 78; }
+  python3 scripts/validate-platform.py
+fi
 if find infra/terraform -type f -name '*.tf' -print -quit 2>/dev/null | grep -q .; then
   command -v terraform >/dev/null 2>&1 || { printf '%s\n' 'BLOCKED: terraform not installed for local static validation.' >&2; exit 78; }
   terraform fmt -check -diff -recursive infra/terraform

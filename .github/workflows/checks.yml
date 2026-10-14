@@ -22,7 +22,7 @@ jobs:
       - name: Python Stage 0 safety tests
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install pytest boto3
+          python3 -m pip install pytest boto3 PyYAML==6.0.3
           python3 -m pytest -q tests/labops
       - name: Shell syntax and ShellCheck (all shell scripts)
         run: |
@@ -30,6 +30,8 @@ jobs:
           find scripts -type f -name '*.sh' -print0 | xargs -0 -r shellcheck -x -P SCRIPTDIR
       - name: Catalogue (43 scenarios)
         run: python3 scripts/check_scenarios.py
+      - name: Platform manifest syntax and safety invariants
+        run: python3 scripts/validate-platform.py
       - name: Gitleaks secret scan
         uses: gitleaks/gitleaks-action@v2 # TODO: pin to reviewed commit SHA
         env:
