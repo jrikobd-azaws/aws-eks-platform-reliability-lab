@@ -4,7 +4,7 @@ module "platform_iam" {
   expected_account_id     = var.expected_account_id
   cluster_name            = module.eks.cluster_name
   cluster_oidc_issuer_url = module.eks.cluster_oidc_issuer_url
-  rds_master_secret_arn   = module.rds.master_secret_arn
+  app_runtime_secret_arn  = var.app_runtime_secret_arn
   tags                    = local.lab_tags
 }
 

@@ -103,3 +103,15 @@ variable "db_master_username" {
   type        = string
   default     = "lab_admin"
 }
+variable "app_runtime_secret_arn" {
+  description = "Exact Secrets Manager ARN for the dedicated PostgreSQL application runtime identity."
+  type        = string
+
+  validation {
+    condition = can(regex(
+      "^arn:aws:secretsmanager:eu-west-1:${var.expected_account_id}:secret:eks-platform-reliability-lab/dev/app-runtime-[A-Za-z0-9]{6}$",
+      var.app_runtime_secret_arn
+    ))
+    error_message = "Provide the exact application runtime secret ARN in the approved AWS account."
+  }
+}

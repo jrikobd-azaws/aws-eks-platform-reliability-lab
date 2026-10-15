@@ -13,8 +13,8 @@ variable "cluster_oidc_issuer_url" {
   type        = string
 }
 
-variable "rds_master_secret_arn" {
-  description = "Exact RDS-managed secret ARN authorized for the dev External Secrets service account."
+variable "app_runtime_secret_arn" {
+  description = "Exact dedicated application runtime secret ARN authorized for ESO."
   type        = string
 }
 
