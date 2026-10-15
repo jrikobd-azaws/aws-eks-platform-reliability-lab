@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# V3 lifecycle coordinator v0.1: status and approved backup+destroy-plan only.
+# No teardown, cloud deletion, Terraform apply, Helm uninstall or GitOps mutation.
+set -Eeuo pipefail
+umask 077
+fail() { printf 'BLOCKED: %s\n' "$*" >&2; exit 78; }
+usage() { printf 'Usage: bash scripts/lifecycle/labctl status|prepare-shutdown\n'; }
+[[ $# == 1 ]] || { usage; exit 2; }
+case "$1" in status|prepare-shutdown) MODE="$1" ;; *) usage; exit 2 ;; esac
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+[[ "$(basename "$ROOT")" == aws-eks-platform-reliability-lab ]] || fail 'Unexpected project directory'
+cd "$ROOT"
+for file in scripts/lifecycle/lab-backup.sh scripts/lifecycle/lab-db-backup.sh scripts/lifecycle/lab-shutdown-preflight.sh scripts/lifecycle/lab-shutdown-plan.sh; do
+  [[ -f "$file" ]] || fail "Missing required component $file"
+  bash -n "$file" || fail "Invalid Bash syntax in $file"
+done
+export AWS_PROFILE="${AWS_PROFILE:-eks-lab-terraform}"
+export AWS_REGION=eu-west-1 AWS_DEFAULT_REGION=eu-west-1 AWS_EC2_METADATA_DISABLED=true
+command -v aws >/dev/null || fail 'AWS CLI missing'
+IDENTITY="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" || fail 'AWS authentication unavailable; run aws login --profile eks-lab-admin, then retry'
+[[ "$IDENTITY" == 275544662748 ]] || fail "Unexpected AWS account: $IDENTITY"
+printf 'PASS: Verified account %s, profile %s\n' "$IDENTITY" "$AWS_PROFILE"
+if [[ "$MODE" == status ]]; then
+  printf 'Running read-only recovery inventory and dependency checks.\n'
+  bash scripts/lifecycle/lab-backup.sh
+  bash scripts/lifecycle/lab-shutdown-preflight.sh
+  printf 'PASS: Status collected. Nothing backed up or destroyed.\n'
+  exit 0
+fi
+[[ -t 0 ]] || fail 'Interactive terminal required for explicit database-backup approval'
+printf '\nPREPARE-SHUTDOWN will:\n'
+printf '  1. Capture read-only recovery inventory\n'
+printf '  2. Create a new encrypted PostgreSQL backup using a temporary Kubernetes pod\n'
+printf '  3. Inventory dependencies and generate a private Terraform destroy plan\n'
+printf 'It will NOT clean up dependencies or execute Terraform destroy.\n'
+printf 'Type BACKUP to approve the temporary pod and database backup: '
+IFS= read -r ANSWER
+[[ "$ANSWER" == BACKUP ]] || fail 'Backup not approved'
+bash scripts/lifecycle/lab-backup.sh
+LAB_DB_BACKUP_APPROVED=YES bash scripts/lifecycle/lab-db-backup.sh --execute
+bash scripts/lifecycle/lab-shutdown-preflight.sh
+bash scripts/lifecycle/lab-shutdown-plan.sh --plan
+printf '\nPASS: Backup and destroy PLAN completed. NO RESOURCES DESTROYED.\n'
+printf 'Next: human review of dependent cleanup and saved plan; no automatic apply is enabled.\n'
