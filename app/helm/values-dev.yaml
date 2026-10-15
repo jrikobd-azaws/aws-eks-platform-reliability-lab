@@ -1,0 +1,8 @@
+backend:
+  image: "275544662748.dkr.ecr.eu-west-1.amazonaws.com/eks-platform-reliability-lab/backend@sha256:a2ef52d32a137d772e62cc9883570c7c8f4222bd32a26dcce6a058b597c707e8"
+frontend:
+  image: "275544662748.dkr.ecr.eu-west-1.amazonaws.com/eks-platform-reliability-lab/frontend@sha256:6f41d5a510108d4f4df14635d482af701ea0247319b6869c75b1f7a513155a5b"
+database:
+  host: "eks-platform-reliability-lab-postgres.cjm2wmey4ueu.eu-west-1.rds.amazonaws.com"
+  name: "app"
+  port: 5432

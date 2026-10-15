@@ -22,3 +22,7 @@ variable "tags" {
   description = "Approved Project/Stack ownership tags."
   type        = map(string)
 }
+variable "fastapi_auth_secret_arn" {
+  description = "ARN of the retained FastAPI authentication secret."
+  type        = string
+}

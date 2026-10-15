@@ -5,6 +5,7 @@ module "platform_iam" {
   cluster_name            = module.eks.cluster_name
   cluster_oidc_issuer_url = module.eks.cluster_oidc_issuer_url
   app_runtime_secret_arn  = var.app_runtime_secret_arn
+  fastapi_auth_secret_arn = data.aws_secretsmanager_secret.fastapi_auth.arn
   tags                    = local.lab_tags
 }
 

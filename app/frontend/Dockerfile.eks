@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1.7
+ARG BUN_IMAGE
+ARG NGINX_IMAGE
+FROM ${BUN_IMAGE} AS builder
+WORKDIR /workspace
+COPY package.json bun.lock ./
+COPY frontend/package.json frontend/package.json
+COPY packages packages
+RUN bun install --frozen-lockfile
+COPY frontend frontend
+WORKDIR /workspace/frontend
+ENV VITE_API_URL=
+RUN bun run build && test -f dist/index.html
+FROM ${NGINX_IMAGE} AS runtime
+COPY --from=builder /workspace/frontend/dist /usr/share/nginx/html
+COPY frontend/nginx.eks.conf /etc/nginx/conf.d/default.conf
+EXPOSE 8080
