@@ -72,7 +72,7 @@ resource "aws_iam_policy" "dev_secrets_reader" {
         "secretsmanager:DescribeSecret",
         "secretsmanager:GetSecretValue",
       ]
-      Resource = var.rds_master_secret_arn
+      Resource = var.app_runtime_secret_arn
     }]
   })
 
