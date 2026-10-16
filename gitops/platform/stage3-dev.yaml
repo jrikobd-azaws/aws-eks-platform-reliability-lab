@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: stage3-dev
+  namespace: argocd
+  labels:
+    azawslab.co.uk/bootstrap: stage3-cli
+spec:
+  destination:
+    namespace: dev
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    helm:
+      releaseName: eks-platform-app
+      valueFiles:
+      - values-dev.yaml
+    path: app/helm
+    repoURL: https://github.com/jrikobd-azaws/aws-eks-platform-reliability-lab.git
+    targetRevision: 540ed080c0dd52f0e6855c754f687f999887dc9f
+  syncPolicy:
+    syncOptions:
+    - CreateNamespace=false
