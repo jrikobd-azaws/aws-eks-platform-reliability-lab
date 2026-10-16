@@ -54,9 +54,33 @@ jobs:
           else
             echo 'Trivy not installed; skipping IaC security scan.'
           fi
-      - name: Block release if Helm chart lacks validation gates
+      - name: Set up pinned Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: 'v3.18.6'
+
+      - name: Validate Helm chart and immutable images
+        shell: bash
         run: |
-          if test -f app/helm/Chart.yaml; then
-            echo 'BLOCKED: add pinned Helm lint/render CI before merging chart'
-            exit 1
-          fi
+          set -euo pipefail
+          helm lint app/helm -f app/helm/values-dev.yaml
+          helm template eks-platform-app app/helm --namespace dev -f app/helm/values-dev.yaml > "$RUNNER_TEMP/stage3-helm-rendered.yaml"
+          python3 - "$RUNNER_TEMP/stage3-helm-rendered.yaml" <<'HELM_VALIDATION'
+          import re
+          import sys
+          from pathlib import Path
+
+          rendered = Path(sys.argv[1]).read_text()
+          images = re.findall(r'(?m)^\s*image:\s*["\']?([^"\'\s]+)', rendered)
+
+          if len(images) < 2:
+              raise SystemExit("BLOCKED: Expected backend and frontend images")
+
+          if not all(re.fullmatch(r".+@sha256:[a-f0-9]{64}", image) for image in images):
+              raise SystemExit("BLOCKED: Application images must use immutable SHA256 digests")
+
+          if "kind: Deployment" not in rendered or "kind: Service" not in rendered:
+              raise SystemExit("BLOCKED: Missing required application resources")
+
+          print(f"PASS: Helm validation and {len(images)} immutable images")
+          HELM_VALIDATION
