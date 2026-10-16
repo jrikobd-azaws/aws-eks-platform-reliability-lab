@@ -1,10 +1,13 @@
+const randomHex = (length: number): string =>
+  crypto.randomUUID().replace(/-/g, "").slice(0, length)
+
 export const randomEmail = () =>
-  `test_${Math.random().toString(36).substring(7)}@example.com`
+  `test_${randomHex(12)}@example.com`
 
 export const randomTeamName = () =>
-  `Team ${Math.random().toString(36).substring(7)}`
+  `Team ${randomHex(12)}`
 
-export const randomPassword = () => `${Math.random().toString(36).substring(2)}`
+export const randomPassword = () => `${randomHex(20)}`
 
 export const slugify = (text: string) =>
   text
@@ -13,7 +16,7 @@ export const slugify = (text: string) =>
     .replace(/[^\w-]+/g, "")
 
 export const randomItemTitle = () =>
-  `Item ${Math.random().toString(36).substring(7)}`
+  `Item ${randomHex(12)}`
 
 export const randomItemDescription = () =>
-  `Description ${Math.random().toString(36).substring(7)}`
+  `Description ${randomHex(12)}`
