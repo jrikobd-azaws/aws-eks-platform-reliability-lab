@@ -1,0 +1,316 @@
+name: Stage 3 application delivery
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "app/**"
+      - ".github/workflows/stage3-delivery.yml"
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - ".github/workflows/stage3-delivery.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stage3-delivery-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-build:
+    name: Stage 3 build and scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Validate immutable build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in PYTHON_IMAGE UV_IMAGE BUN_IMAGE NGINX_IMAGE; do
+            value="$(sed -n "s/^${key}=//p" app/base-images.lock)"
+            [[ "$value" =~ ^[A-Za-z0-9./:_-]+@sha256:[a-f0-9]{64}$ ]] || exit 1
+            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
+          done
+
+      - name: Prepare isolated application context
+        shell: bash
+        run: |
+          set -euo pipefail
+          CTX="$RUNNER_TEMP/stage3-context"
+          mkdir -p "$CTX"
+          cp app/upstream/{uv.lock,bun.lock,pyproject.toml,package.json} "$CTX/"
+          cp -a app/backend app/frontend app/packages "$CTX/"
+          if find "$CTX" -type f -name '.env*' -print -quit | grep -q .; then
+            echo "BLOCKED: Environment file in build context"
+            exit 1
+          fi
+          python3 -m compileall -q app/backend
+
+      - name: TypeScript validation and Playwright discovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          CTX="$RUNNER_TEMP/stage3-context"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/workspace \
+            -e BUN_INSTALL_CACHE_DIR=/workspace/.bun-cache \
+            -v "$CTX:/workspace" -w /workspace \
+            "$BUN_IMAGE" bun install --frozen-lockfile --ignore-scripts
+
+          docker run --rm --network=none \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/workspace \
+            -v "$CTX:/workspace" -w /workspace/frontend \
+            "$BUN_IMAGE" bun run --bun tsc --noEmit -p tsconfig.json
+
+          docker run --rm --network=none \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/workspace \
+            -e FIRST_SUPERUSER=discovery@example.invalid \
+            -e FIRST_SUPERUSER_PASSWORD=DiscoveryOnly_123 \
+            -v "$CTX:/workspace" -w /workspace/frontend \
+            "$BUN_IMAGE" bun run --bun playwright test --list \
+            --config playwright.config.ts
+
+      - name: Build backend and frontend images
+        shell: bash
+        run: |
+          set -euo pipefail
+          CTX="$RUNNER_TEMP/stage3-context"
+          docker build -f app/backend/Dockerfile.eks \
+            --build-arg "PYTHON_IMAGE=$PYTHON_IMAGE" \
+            --build-arg "UV_IMAGE=$UV_IMAGE" \
+            -t stage3-backend:ci "$CTX"
+          docker build -f app/frontend/Dockerfile.eks \
+            --build-arg "BUN_IMAGE=$BUN_IMAGE" \
+            --build-arg "NGINX_IMAGE=$NGINX_IMAGE" \
+            -t stage3-frontend:ci "$CTX"
+
+      - name: Enforce backend CVE exception expiry
+        shell: bash
+        run: |
+          set -euo pipefail
+          today="$(date -u +%F)"
+          if [[ "$today" > "2026-11-16" ]]; then
+            echo "BLOCKED: Backend CVE exception expired"
+            exit 1
+          fi
+          grep -Fxq 'CVE-2026-76642' .github/security/backend-cve-2026-76642.trivyignore
+          test "$(grep -Ec '^CVE-[0-9]{4}-[0-9]+$' .github/security/backend-cve-2026-76642.trivyignore)" -eq 1
+
+      - name: Record unfiltered backend vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: image
+          image-ref: stage3-backend:ci
+          severity: HIGH,CRITICAL
+          exit-code: '0'
+          format: json
+          output: backend-trivy-full.json
+
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: image
+          image-ref: stage3-backend:ci
+          trivyignores: .github/security/backend-cve-2026-76642.trivyignore
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          format: table
+
+      - name: Archive unfiltered backend scan
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: stage3-backend-trivy-full
+          path: backend-trivy-full.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Scan frontend image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: image
+          image-ref: stage3-frontend:ci
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          format: table
+
+  publish:
+    name: Publish immutable ECR images
+    needs: validate-build
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      vars.ENABLE_ECR_PUBLISH == 'true' &&
+      vars.AWS_ECR_ROLE_ARN != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      AWS_REGION: eu-west-1
+      AWS_ACCOUNT: '275544662748'
+      BACKEND_REPOSITORY: eks-platform-reliability-lab/backend
+      FRONTEND_REPOSITORY: eks-platform-reliability-lab/frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Obtain short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: ${{ vars.AWS_ECR_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - name: Verify account and immutable ECR repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = "$AWS_ACCOUNT"
+          for repo in "$BACKEND_REPOSITORY" "$FRONTEND_REPOSITORY"; do
+            state="$(aws ecr describe-repositories \
+              --repository-names "$repo" \
+              --query 'repositories[0].imageTagMutability' --output text)"
+            test "$state" = IMMUTABLE
+          done
+
+      - name: Prepare pinned build context
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in PYTHON_IMAGE UV_IMAGE BUN_IMAGE NGINX_IMAGE; do
+            value="$(sed -n "s/^${key}=//p" app/base-images.lock)"
+            [[ "$value" =~ ^[A-Za-z0-9./:_-]+@sha256:[a-f0-9]{64}$ ]] || exit 1
+            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
+          done
+          CTX="$RUNNER_TEMP/stage3-context"
+          mkdir -p "$CTX"
+          cp app/upstream/{uv.lock,bun.lock,pyproject.toml,package.json} "$CTX/"
+          cp -a app/backend app/frontend app/packages "$CTX/"
+          if find "$CTX" -type f -name '.env*' -print -quit | grep -q .; then
+            echo "BLOCKED: Environment file in build context"
+            exit 1
+          fi
+
+      - name: Build and scan publication images
+        shell: bash
+        run: |
+          set -euo pipefail
+          CTX="$RUNNER_TEMP/stage3-context"
+          docker build -f app/backend/Dockerfile.eks \
+            --build-arg "PYTHON_IMAGE=$PYTHON_IMAGE" \
+            --build-arg "UV_IMAGE=$UV_IMAGE" \
+            -t stage3-backend:publish "$CTX"
+          docker build -f app/frontend/Dockerfile.eks \
+            --build-arg "BUN_IMAGE=$BUN_IMAGE" \
+            --build-arg "NGINX_IMAGE=$NGINX_IMAGE" \
+            -t stage3-frontend:publish "$CTX"
+
+      - name: Enforce backend CVE exception expiry
+        shell: bash
+        run: |
+          set -euo pipefail
+          today="$(date -u +%F)"
+          if [[ "$today" > "2026-11-16" ]]; then
+            echo "BLOCKED: Backend CVE exception expired"
+            exit 1
+          fi
+          grep -Fxq 'CVE-2026-76642' .github/security/backend-cve-2026-76642.trivyignore
+          test "$(grep -Ec '^CVE-[0-9]{4}-[0-9]+$' .github/security/backend-cve-2026-76642.trivyignore)" -eq 1
+
+      - name: Scan publication backend
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: image
+          image-ref: stage3-backend:publish
+          trivyignores: .github/security/backend-cve-2026-76642.trivyignore
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+
+      - name: Scan publication frontend
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: image
+          image-ref: stage3-frontend:publish
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+
+      - name: Publish images and record immutable digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          REGISTRY="$AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com"
+          TAG="sha-$GITHUB_SHA"
+
+          aws ecr get-login-password --region "$AWS_REGION" |
+            docker login --username AWS --password-stdin "$REGISTRY"
+
+          for role in backend frontend; do
+            if [ "$role" = backend ]; then
+              repo="$BACKEND_REPOSITORY"
+            else
+              repo="$FRONTEND_REPOSITORY"
+            fi
+
+            if aws ecr describe-images --repository-name "$repo" \
+              --image-ids "imageTag=$TAG" >/dev/null 2>&1; then
+              echo "BLOCKED: Image tag already exists"
+              exit 1
+            fi
+
+            docker tag "stage3-$role:publish" "$REGISTRY/$repo:$TAG"
+            docker push "$REGISTRY/$repo:$TAG"
+          done
+
+          python3 - <<'DIGEST_REPORT'
+          import json, os, re, subprocess
+          from pathlib import Path
+
+          registry = (
+              os.environ["AWS_ACCOUNT"] + ".dkr.ecr."
+              + os.environ["AWS_REGION"] + ".amazonaws.com"
+          )
+          tag = "sha-" + os.environ["GITHUB_SHA"]
+          result = {
+              "source_commit": os.environ["GITHUB_SHA"],
+              "promotion": "REVIEW_REQUIRED"
+          }
+
+          for role in ("backend", "frontend"):
+              repo = os.environ[role.upper() + "_REPOSITORY"]
+              digest = subprocess.check_output([
+                  "aws", "ecr", "describe-images",
+                  "--repository-name", repo,
+                  "--image-ids", "imageTag=" + tag,
+                  "--query", "imageDetails[0].imageDigest",
+                  "--output", "text"
+              ], text=True).strip()
+
+              if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+                  raise SystemExit("BLOCKED: Invalid ECR digest")
+
+              result[role] = registry + "/" + repo + "@" + digest
+
+          Path("promotion-digests.json").write_text(
+              json.dumps(result, indent=2) + "\n"
+          )
+          DIGEST_REPORT
+
+      - name: Save ECR digest evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: stage3-ecr-digests
+          path: promotion-digests.json
+          retention-days: 7
