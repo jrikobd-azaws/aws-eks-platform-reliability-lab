@@ -7,7 +7,7 @@ COPY frontend/package.json /app/frontend/
 
 WORKDIR /app/frontend
 
-RUN bun install
+RUN bun install --frozen-lockfile --ignore-scripts
 
 COPY ./frontend /app/frontend
 

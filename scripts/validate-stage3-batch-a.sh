@@ -93,14 +93,12 @@ if [[ "$MODE" == fastapi-rds ]]; then
 
     POD="stage3-fastapi-rds-$(date +%s)-$$"
 
-    # Invoked indirectly by the EXIT trap.
-    # shellcheck disable=SC2329,SC2317
-    cleanup() {
+    # Execute temporary-pod cleanup directly on exit.
+    trap '
       kubectl -n dev delete pod "$POD" \
         --ignore-not-found --wait=true --timeout=90s >/dev/null 2>&1 || \
         echo "WARNING: Verify temporary pod cleanup: $POD" >&2
-    }
-    trap cleanup EXIT
+    ' EXIT
 
     echo "=== CREATE TEMPORARY FASTAPI POD ==="
 
