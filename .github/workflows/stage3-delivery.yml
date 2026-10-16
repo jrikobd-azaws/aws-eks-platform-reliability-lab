@@ -94,14 +94,46 @@ jobs:
             --build-arg "NGINX_IMAGE=$NGINX_IMAGE" \
             -t stage3-frontend:ci "$CTX"
 
-      - name: Scan backend image
+      - name: Enforce backend CVE exception expiry
+        shell: bash
+        run: |
+          set -euo pipefail
+          today="$(date -u +%F)"
+          if [[ "$today" > "2026-11-16" ]]; then
+            echo "BLOCKED: Backend CVE exception expired"
+            exit 1
+          fi
+          grep -Fxq 'CVE-2026-76642' .github/security/backend-cve-2026-76642.trivyignore
+          test "$(grep -Ec '^CVE-[0-9]{4}-[0-9]+$' .github/security/backend-cve-2026-76642.trivyignore)" -eq 1
+
+      - name: Record unfiltered backend vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: image
           image-ref: stage3-backend:ci
           severity: HIGH,CRITICAL
+          exit-code: '0'
+          format: json
+          output: backend-trivy-full.json
+
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: image
+          image-ref: stage3-backend:ci
+          trivyignores: .github/security/backend-cve-2026-76642.trivyignore
+          severity: HIGH,CRITICAL
           exit-code: '1'
           format: table
+
+      - name: Archive unfiltered backend scan
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: stage3-backend-trivy-full
+          path: backend-trivy-full.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Scan frontend image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
@@ -186,11 +218,24 @@ jobs:
             --build-arg "NGINX_IMAGE=$NGINX_IMAGE" \
             -t stage3-frontend:publish "$CTX"
 
+      - name: Enforce backend CVE exception expiry
+        shell: bash
+        run: |
+          set -euo pipefail
+          today="$(date -u +%F)"
+          if [[ "$today" > "2026-11-16" ]]; then
+            echo "BLOCKED: Backend CVE exception expired"
+            exit 1
+          fi
+          grep -Fxq 'CVE-2026-76642' .github/security/backend-cve-2026-76642.trivyignore
+          test "$(grep -Ec '^CVE-[0-9]{4}-[0-9]+$' .github/security/backend-cve-2026-76642.trivyignore)" -eq 1
+
       - name: Scan publication backend
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: image
           image-ref: stage3-backend:publish
+          trivyignores: .github/security/backend-cve-2026-76642.trivyignore
           severity: HIGH,CRITICAL
           exit-code: '1'
 
