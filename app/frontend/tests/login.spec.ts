@@ -1,3 +1,4 @@
+import { verifyInput } from "./utils/user"
 import { expect, type Page, test } from "@playwright/test"
 import { firstSuperuser, firstSuperuserPassword } from "./config.ts"
 import { randomPassword } from "./utils/random.ts"
@@ -9,12 +10,7 @@ const fillForm = async (page: Page, email: string, password: string) => {
   await page.getByTestId("password-input").fill(password)
 }
 
-const verifyInput = async (page: Page, testId: string) => {
-  const input = page.getByTestId(testId)
-  await expect(input).toBeVisible()
-  await expect(input).toHaveText("")
-  await expect(input).toBeEditable()
-}
+
 
 test("Inputs are visible, empty and editable", async ({ page }) => {
   await page.goto("/login")

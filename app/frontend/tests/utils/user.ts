@@ -1,3 +1,4 @@
+import { expect as verifyInputExpect } from "@playwright/test"
 import { expect, type Page } from "@playwright/test"
 
 export async function signUpNewUser(
@@ -32,4 +33,11 @@ export async function logOutUser(page: Page) {
   await page.getByTestId("user-menu").click()
   await page.getByRole("menuitem", { name: "Log out" }).click()
   await page.goto("/login")
+}
+
+export const verifyInput = async (page: import("@playwright/test").Page, testId: string) => {
+  const input = page.getByTestId(testId)
+  await verifyInputExpect(input).toBeVisible()
+  await verifyInputExpect(input).toHaveText("")
+  await verifyInputExpect(input).toBeEditable()
 }

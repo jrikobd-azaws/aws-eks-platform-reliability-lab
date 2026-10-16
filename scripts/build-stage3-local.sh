@@ -29,7 +29,7 @@ fi
 for key in PYTHON_IMAGE UV_IMAGE BUN_IMAGE NGINX_IMAGE; do
   line="$(grep -E "^${key}=" "$LOCK" || true)"
   [[ "$line" =~ ^${key}=[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}$ ]] || { echo "BLOCKED: invalid $key in $LOCK" >&2; exit 78; }
-  export "$line"
+  declare -x "$line"
 done
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -83,7 +83,7 @@ docker run -d --name "$BACKEND" --network "$NETWORK" --network-alias backend --n
 docker run -d --name "$FRONTEND" --network "$NETWORK"   --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m   -p 127.0.0.1:18080:8080 eks-lab-frontend:local >/dev/null
 wait_http() {
   local url="$1" expected="$2" actual="" name="$3"
-  for attempt in $(seq 1 30); do
+  for (( attempt = 1; attempt <= 30; attempt++ )); do
     actual="$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)"
     if [[ "$actual" == "$expected" ]]; then echo "PASS: $name HTTP $expected"; return 0; fi
     sleep 1

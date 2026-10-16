@@ -1,3 +1,4 @@
+import { verifyInput } from "./utils/user"
 import { expect, type Page, test } from "@playwright/test"
 
 import { randomEmail, randomPassword } from "./utils/random"
@@ -17,12 +18,7 @@ const fillForm = async (
   await page.getByTestId("confirm-password-input").fill(confirm_password)
 }
 
-const verifyInput = async (page: Page, testId: string) => {
-  const input = page.getByTestId(testId)
-  await expect(input).toBeVisible()
-  await expect(input).toHaveText("")
-  await expect(input).toBeEditable()
-}
+
 
 test("Inputs are visible, empty and editable", async ({ page }) => {
   await page.goto("/signup")
