@@ -5,15 +5,21 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y unzip \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL https://bun.sh/install | bash
-ENV PATH="/root/.bun/bin:$PATH"
+COPY --from=oven/bun@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598 /usr/local/bin/bun /usr/local/bin/bun
 
 COPY package.json bun.lock /app/
 
 COPY frontend/package.json /app/frontend/
+COPY packages /app/packages
 
 WORKDIR /app/frontend
 
-RUN bun install
+# Install dependencies under the unprivileged Playwright user.
+RUN id pwuser && chown -R pwuser:pwuser /app
 
-COPY ./frontend /app/frontend
+ENV HOME=/home/pwuser
+USER pwuser
+
+RUN bun install --frozen-lockfile --ignore-scripts
+
+COPY --chown=pwuser:pwuser ./frontend /app/frontend

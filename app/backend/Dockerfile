@@ -51,7 +51,7 @@ COPY ./backend/pyproject.toml ./backend/alembic.ini /app/backend/
 
 COPY ./backend/app /app/backend/app
 
-COPY --from=frontend-build /app/backend/app/frontend /app/backend/app/frontend
+COPY --from=frontend-build /app/frontend/dist /app/backend/app/frontend
 
 # Sync the project
 # Ref: https://docs.astral.sh/uv/guides/integration/docker/#intermediate-layers
@@ -61,5 +61,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --package app
 
 WORKDIR /app/backend/
+
+# Build steps run as root; application runtime is unprivileged.
+RUN groupadd --gid 10001 appuser \
+    && useradd --uid 10001 --gid 10001 \
+       --create-home --shell /usr/sbin/nologin appuser \
+    && chown -R 10001:10001 /app
+
+ENV HOME=/home/appuser \
+    PYTHONDONTWRITEBYTECODE=1
+
+USER 10001:10001
 
 CMD ["fastapi", "run", "--workers", "4"]
