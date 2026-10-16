@@ -1,0 +1,60 @@
+
+# syntax=docker/dockerfile:1.7
+
+ARG PYTHON_IMAGE
+ARG UV_IMAGE
+
+FROM ${UV_IMAGE} AS uvbin
+
+FROM ${PYTHON_IMAGE} AS builder
+
+COPY --from=uvbin /uv /uvx /usr/local/bin/
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1
+
+WORKDIR /workspace
+
+COPY pyproject.toml uv.lock ./
+COPY backend/pyproject.toml backend/pyproject.toml
+
+RUN uv sync --frozen --no-dev --package app --no-install-project
+
+COPY backend/app backend/app
+COPY backend/alembic.ini backend/alembic.ini
+
+RUN uv sync --frozen --no-dev --package app
+
+FROM ${PYTHON_IMAGE} AS runtime
+
+RUN mkdir -p /etc/ssl/rds
+COPY backend/certs/global-bundle.pem /etc/ssl/rds/global-bundle.pem
+
+# Apply available Debian package security updates.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/workspace/.venv/bin:${PATH}"
+
+WORKDIR /workspace
+
+COPY --from=builder /workspace/.venv /workspace/.venv
+COPY --from=builder /workspace/backend /workspace/backend
+
+RUN groupadd --gid 10001 appuser \
+    && useradd --uid 10001 --gid 10001 \
+    --create-home --shell /usr/sbin/nologin appuser \
+    && chown -R 10001:10001 /workspace
+
+USER 10001:10001
+
+WORKDIR /workspace/backend
+
+EXPOSE 8000
+
+CMD ["fastapi", "run", "--host", "0.0.0.0", "--port", "8000"]

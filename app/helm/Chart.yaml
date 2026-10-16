@@ -1,0 +1,6 @@
+apiVersion: v2
+name: eks-platform-app
+description: FastAPI and React application for EKS reliability lab
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

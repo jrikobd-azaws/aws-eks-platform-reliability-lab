@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eks-platform-backend
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector:
+    matchLabels:
+      app: eks-platform-backend
+  template:
+    metadata:
+      labels:
+        app: eks-platform-backend
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backend
+          image: {{ required "backend.image required" .Values.backend.image | quote }}
+          ports:
+            - containerPort: 8000
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 8000
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8000
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8000
+            periodSeconds: 5
+          env:
+            - name: PROJECT_NAME
+              value: EKS Reliability Lab
+            - name: DB_HOST
+              value: {{ .Values.database.host | quote }}
+            - name: DB_NAME
+              value: {{ .Values.database.name | quote }}
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rds-credentials
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rds-credentials
+                  key: password
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: fastapi-auth
+                  key: SECRET_KEY
+            - name: FIRST_SUPERUSER
+              valueFrom:
+                secretKeyRef:
+                  name: fastapi-auth
+                  key: FIRST_SUPERUSER
+            - name: FIRST_SUPERUSER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fastapi-auth
+                  key: FIRST_SUPERUSER_PASSWORD
+          command:
+            - /workspace/.venv/bin/python
+            - -c
+            - |
+              import os
+              from urllib.parse import quote
+              user = quote(os.environ.pop("DB_USER"), safe="")
+              password = quote(os.environ.pop("DB_PASSWORD"), safe="")
+              host = os.environ.pop("DB_HOST")
+              db = os.environ.pop("DB_NAME")
+              os.environ["DATABASE_URL"] = (
+                  f"postgresql://{user}:{password}@{host}:5432/{db}"
+                  "?sslmode=verify-full&sslrootcert=/etc/ssl/rds/global-bundle.pem"
+              )
+              os.execvp("fastapi", [
+                  "fastapi", "run", "--host", "0.0.0.0", "--port", "8000"
+              ])
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eks-platform-backend
+spec:
+  type: ClusterIP
+  selector:
+    app: eks-platform-backend
+  ports:
+    - port: 8000
+      targetPort: 8000
