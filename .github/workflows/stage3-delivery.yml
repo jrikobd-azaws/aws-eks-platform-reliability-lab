@@ -119,13 +119,13 @@ jobs:
       - name: Scan backend image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
-          scan-type: image
-          image-ref: stage3-backend:ci
-          trivyignores: .github/security/backend-cve-2026-76642.trivyignore
-          severity: HIGH,CRITICAL
-          exit-code: '1'
-          format: table
-
+          scan-type: 'image'
+          image-ref: 'stage3-backend:ci'
+          format: 'json'
+          output: 'backend-trivy-full.json'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: 'false'
+          exit-code: '0'
       - name: Archive unfiltered backend scan
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -138,12 +138,72 @@ jobs:
       - name: Scan frontend image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
-          scan-type: image
-          image-ref: stage3-frontend:ci
-          severity: HIGH,CRITICAL
-          exit-code: '1'
-          format: table
-
+          scan-type: 'image'
+          image-ref: 'stage3-frontend:ci'
+          format: 'json'
+          output: 'frontend-trivy-full.json'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: 'false'
+          exit-code: '0'
+      - name: Enforce documented lab vulnerability policy
+        shell: bash
+        run: |
+          python3 - <<'PY_LAB_GATE'
+          import json, os, sys
+          from pathlib import Path
+          results = {}
+          blocking = []
+          for service in ("backend", "frontend"):
+              source = Path(f"{service}-trivy-full.json")
+              if not source.is_file():
+                  raise SystemExit(f"BLOCKED: missing full Trivy report: {source}")
+              scan = json.loads(source.read_text())
+              if scan.get("ArtifactType") != "container_image" or not isinstance(scan.get("Results"), list):
+                  raise SystemExit(f"BLOCKED: incomplete Trivy report: {source}")
+              if not (scan.get("Metadata") or {}).get("OS", {}).get("Family"):
+                  raise SystemExit(f"BLOCKED: Trivy did not identify the container OS: {source}")
+              seen = {}
+              for target in scan["Results"]:
+                  for v in target.get("Vulnerabilities") or []:
+                      if v.get("Severity") not in ("HIGH", "CRITICAL"):
+                          continue
+                      key = v["VulnerabilityID"]
+                      fixed = bool((v.get("FixedVersion") or "").strip())
+                      record = seen.setdefault(key, {"severity": v["Severity"], "fixed": False})
+                      record["fixed"] = record["fixed"] or fixed
+                      if v["Severity"] == "CRITICAL" or (v["Severity"] == "HIGH" and fixed):
+                          blocking.append(f"{service}:{key}")
+              results[service] = {"unique_high_critical": len(seen),
+                                  "reported_unfixed_high": sorted(k for k,v in seen.items() if v["severity"] == "HIGH" and not v["fixed"]),
+                                  "blocking": sorted(k for k,v in seen.items() if v["severity"] == "CRITICAL" or v["fixed"])}
+          summary = {"policy": "LAB ONLY: block CRITICAL and fixable HIGH; report unfixed HIGH",
+                     "images": results, "blocking": sorted(set(blocking)),
+                     "accepted_risk": "Unfixed HIGH findings are reported and permitted for this disposable lab only."}
+          Path("stage3-lab-security-decision.json").write_text(json.dumps(summary, indent=2) + "\n")
+          lines = ["## Stage 3 lab vulnerability gate", "", "CRITICAL: block; HIGH with a reported fix: block; unfixed HIGH: report.", ""]
+          for name, item in results.items():
+              lines.append(f"- {name}: {item['unique_high_critical']} unique HIGH/CRITICAL, {len(item['reported_unfixed_high'])} unfixed HIGH, {len(item['blocking'])} blocking IDs")
+          lines += ["", f"Blocking findings: {len(set(blocking))}", "", "This is a lab-only policy; not a production security approval."]
+          Path("stage3-lab-security-decision.md").write_text("\n".join(lines) + "\n")
+          if os.getenv("GITHUB_STEP_SUMMARY"):
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                  f.write("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          if blocking:
+              raise SystemExit("BLOCKED: CRITICAL or fixable HIGH vulnerability: " + ", ".join(sorted(set(blocking))))
+          PY_LAB_GATE
+      - name: Upload full Trivy and lab security evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stage3-lab-trivy-${{ github.run_id }}
+          path: |
+            backend-trivy-full.json
+            frontend-trivy-full.json
+            stage3-lab-security-decision.json
+            stage3-lab-security-decision.md
+          if-no-files-found: warn
+          retention-days: 14
   publish:
     name: Publish immutable ECR images
     needs: validate-build
