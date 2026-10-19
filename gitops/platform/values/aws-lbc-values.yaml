@@ -1,6 +1,6 @@
 clusterName: eks-platform-reliability-lab
 region: eu-west-1
-vpcId: vpc-04080cdd458d1c532
+vpcId: vpc-0da875652a838ff2d
 
 replicaCount: 2
 configureDefaultAffinity: true
