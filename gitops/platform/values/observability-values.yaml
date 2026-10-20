@@ -1,0 +1,102 @@
+fullnameOverride: observability
+
+defaultRules:
+  create: false
+
+prometheusOperator:
+  admissionWebhooks:
+    enabled: false
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 250m, memory: 384Mi}
+
+prometheus:
+  service:
+    type: ClusterIP
+  prometheusSpec:
+    replicas: 1
+    retention: 6h
+    retentionSize: 512MB
+    scrapeInterval: 30s
+    storageSpec: {}
+    resources:
+      requests: {cpu: 150m, memory: 384Mi}
+      limits: {cpu: 500m, memory: 768Mi}
+
+grafana:
+  service:
+    type: ClusterIP
+  ingress:
+    enabled: false
+  persistence:
+    enabled: false
+  admin:
+    existingSecret: observability-grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 250m, memory: 384Mi}
+  sidecar:
+    dashboards:
+      enabled: true
+      searchNamespace: ALL
+
+alertmanager:
+  alertmanagerSpec:
+    replicas: 1
+    retention: 6h
+    storage: {}
+    resources:
+      requests: {cpu: 25m, memory: 64Mi}
+      limits: {cpu: 150m, memory: 192Mi}
+  config:
+    route:
+      receiver: local-only
+    receivers:
+      - name: local-only
+
+kubeStateMetrics:
+  enabled: true
+
+kube-state-metrics:
+  resources:
+    requests: {cpu: 25m, memory: 64Mi}
+    limits: {cpu: 150m, memory: 192Mi}
+
+nodeExporter:
+  enabled: true
+
+prometheus-node-exporter:
+  resources:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {cpu: 100m, memory: 96Mi}
+
+kubeEtcd: {enabled: false}
+kubeScheduler: {enabled: false}
+kubeControllerManager: {enabled: false}
+kubeProxy: {enabled: false}
+
+additionalPrometheusRulesMap:
+  lab-baseline:
+    groups:
+      - name: eks-lab-baseline
+        rules:
+          - alert: LabTargetDown
+            expr: up == 0
+            for: 3m
+            labels: {severity: warning}
+            annotations:
+              summary: Prometheus target unavailable
+          - alert: LabPodCrashLoop
+            expr: increase(kube_pod_container_status_restarts_total[10m]) > 3
+            for: 2m
+            labels: {severity: warning}
+            annotations:
+              summary: Repeated container restarts
+          - alert: LabNodeMemoryPressure
+            expr: kube_node_status_condition{condition="MemoryPressure",status="true"} == 1
+            for: 5m
+            labels: {severity: warning}
+            annotations:
+              summary: Kubernetes node memory pressure
