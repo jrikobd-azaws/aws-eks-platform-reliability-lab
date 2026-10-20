@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "deployment_mode": "fresh",
+  "aws": {
+    "profile": "YOUR_AWS_PROFILE",
+    "region": "eu-west-1",
+    "expected_account_id": "123456789012"
+  },
+  "project": {
+    "name": "eks-platform-reliability-lab",
+    "environment": "lab",
+    "cluster_name": "eks-platform-reliability-lab"
+  },
+  "terraform": {
+    "directory": "infra/terraform/environments/lab",
+    "backend": {
+      "type": "s3",
+      "bucket": "REPLACE_WITH_UNIQUE_STATE_BUCKET",
+      "key": "eks-platform-reliability-lab/terraform.tfstate",
+      "region": "eu-west-1",
+      "use_lockfile": true
+    }
+  },
+  "images": {
+    "backend": {
+      "repository": "eks-platform-reliability-lab/backend",
+      "source": "build"
+    },
+    "frontend": {
+      "repository": "eks-platform-reliability-lab/frontend",
+      "source": "build"
+    }
+  },
+  "secrets": {
+    "app_runtime": {
+      "name": "eks-platform-reliability-lab/dev/app-runtime",
+      "source": "provision"
+    },
+    "fastapi_auth": {
+      "name": "eks-platform-reliability-lab/dev/fastapi-auth",
+      "source": "provision"
+    }
+  },
+  "database": {
+    "mode": "initialize",
+    "restore_existing_backup": false
+  },
+  "gitops": {
+    "bootstrap_path": "gitops/argocd",
+    "platform_path": "gitops/platform",
+    "application_path": "gitops/platform"
+  }
+}
