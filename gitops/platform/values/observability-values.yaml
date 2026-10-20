@@ -68,6 +68,7 @@ alertmanager:
       receiver: local-only
     receivers:
     - name: local-only
+    - name: "null"
 kubeStateMetrics:
   enabled: true
 kube-state-metrics:
