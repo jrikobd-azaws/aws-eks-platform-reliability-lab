@@ -21,4 +21,5 @@ spec:
     namespace: platform-system
   syncPolicy:
     syncOptions:
+      - ServerSideApply=true
       - CreateNamespace=false
