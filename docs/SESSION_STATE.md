@@ -2,13 +2,31 @@
 
 | Field                                    | Value                                                                                                                              |
 | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Last reviewed                            | 2026-10-14 (Stage 2 platform source; local validation only)                                                                        |
-| Last completed infrastructure stage/wave | Stage 1B reported by owner as complete, deployed, validated and merged; not independently queried in this session                  |
-| Current task                             | Stage 2 platform source implemented and locally validated; no AWS or Kubernetes mutations performed                                |
-| Next approved action                     | Human reviews/applies the saved Stage 2 IAM plan, resolves private GitOps identifiers, then follows the platform bootstrap runbook |
+| Last reviewed                            | 2026-10-20 (Task 1B-R: Lifecycle Safety Hardening Batch 1; local validation only)                                                 |
+| Last completed infrastructure stage/wave | Phase 4 CI/CD: PHASE4_ACCEPTED; PR #13 merged; infrastructure rebuild recovery validated in PR #14                                  |
+| Current task                             | Task 1B-R Batch 1 locally accepted; full lifecycle DR certification remains pending                      |
+| Next approved action                     | Review isolated Git changes; then Stage 1C residual application acceptance; full DR remains approval-gated                |
 | Scenario progress                        | 0 of 43 done (catalogue retained)                                                                                                  |
 
-## Confirmed baseline facts
+## Current accepted engineering checkpoints
+
+### Batch 1 Lifecycle Safety Hardening (2026-10-20)
+- Phase 4 CI/CD: `PHASE4_ACCEPTED` (PR #13 merged, Stage 3 build-and-scan accepted).
+- Verified test suite: 79 passing tests (75 baseline + 4 regression tests), 0 failures.
+- Hardened `CheckpointStore` stage structure validation to prevent corrupted checkpoint resumption.
+- Fixed `CommandRunner` subprocess output fallback ensuring stdout diagnostic capture and secret redaction.
+- Enhanced `labctl.py` CLI error reporting to include exception diagnostic messages.
+- Full lifecycle disaster recovery remains deliberately incomplete; infrastructure rebuild and DB restore remain guarded.
+- Manual Argo CD synchronization policy remains strictly preserved; no autonomous deployments.
+- No live AWS operations, Terraform apply/destroy, Kubernetes mutations, or Git pushes executed.
+
+### Historical starter baseline — 14 October 2026
+
+The following records describe the earlier starter repository
+and local validation session. They are retained for traceability,
+not as statements of current deployed infrastructure or
+completed lifecycle functionality.
+
 - v2 skeleton and v3 targeted safety overlay combined into a **new starter copy**.
 - Four lifecycle launchers deliberately exit 78; cloud lifecycle functionality is NOT implemented.
 - Stage 1A completion is owner-reported; it was not re-queried during this local implementation session.
