@@ -193,3 +193,44 @@ manual deployment approvals and the V3 safety contract remain in force.
 
 The publication of these identifiers exposes infrastructure metadata
 and is not a general production security recommendation.
+
+## Stage 1D-C observability recovery
+
+The authoritative Argo CD bootstrap values are maintained in
+`platform/bootstrap/argocd-values.yaml`.
+
+The Argo CD Application Controller must be restored with:
+
+- One replica.
+- CPU request `100m`, CPU limit `500m`.
+- Memory request `512Mi`, memory limit `1Gi`.
+
+The recovery process must discover the existing Helm release
+revision and status rather than assume a previous live revision.
+
+### Required recovery sequence
+
+1. Restore EKS and Argo CD using the established bootstrap procedure.
+2. Verify controller resources and readiness.
+3. Restore the required AppProject permissions.
+4. Reconcile `observability-crds` and establish all ten CRDs.
+5. Restore the Grafana administrator Secret securely.
+6. Manually synchronize the three-source `observability` Application.
+7. Verify Prometheus, Alertmanager, Grafana and kube-state-metrics.
+8. Verify FastAPI `/metrics` target UP.
+9. Verify all three baseline Prometheus alert rules.
+10. Verify the FastAPI Grafana dashboard and datasource query.
+11. Save sanitized acceptance evidence and resource consumption.
+
+Preserve manual root synchronization, the Stage 3 pinned application
+revision, immutable application images and existing RDS/Alembic
+recovery requirements.
+
+Monitoring storage remains ephemeral with short retention.
+Grafana remains private through ClusterIP and port-forward.
+
+CloudWatch assessment: one relevant log group, no justified
+retention changes, and no additional CloudWatch agents required.
+
+Lifecycle Batch 2 certification must verify that the controller
+resource settings are reproducible after cluster recreation.
