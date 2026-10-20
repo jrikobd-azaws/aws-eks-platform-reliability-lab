@@ -52,3 +52,39 @@ The owner has expressed the intention to demonstrate promotion using **one dispo
 
 ## D. Locked-sizing clarification
 Locked target remains initially **two t3.medium managed nodes** (see decision 5). Their suitability is unverified: evaluate allocatable CPU/memory and observability overhead; any resizing requires an approved decision update. Do not infer capacity from the target alone.
+
+## E. Approved Stage 1C private-only DEV acceptance — 2026-10-20
+
+**Decision:** Private-only DEV integration is approved for
+Stage 1C. Existing frontend and backend ClusterIP Services
+remain unchanged. An external ALB is not required for the
+accepted internal DEV integration checkpoint.
+
+**Rationale:** Internal frontend → Nginx → FastAPI → RDS
+integration has been demonstrated through temporary localhost
+port-forwarding. Provisioning an ALB solely for this DEV
+acceptance would introduce additional AWS runtime cost,
+network exposure and lifecycle teardown dependencies.
+
+**Verified acceptance:** Frontend HTTP, Nginx `/api/` proxy,
+FastAPI liveness/readiness/metrics, five Alembic migrations,
+authenticated demo-user login and PostgreSQL-backed Items
+create/read/delete with verified disposable Item cleanup.
+
+**Limitations:** This does not establish external DNS, TLS,
+ALB listener rules, target-group health or public application
+access.
+
+**Deferred requirement:** External ALB routing remains in the
+authoritative roadmap and requires separately approved
+implementation and acceptance. Private DEV acceptance must
+not be represented as external ingress acceptance.
+
+**Preserved controls:** Root Argo CD automatic synchronization
+remains disabled. Phase 4 CI/CD, ECR publication opt-in,
+Lifecycle Batch 1 safeguards and explicit consequential
+operation approvals remain unchanged.
+
+**Evidence:** Private Stage 1C acceptance evidence remains
+under `.private-evidence/lifecycle/` and is excluded from
+public Git history.

@@ -8,6 +8,61 @@
 | Next approved action                     | Review isolated Git changes; then Stage 1C residual application acceptance; full DR remains approval-gated                |
 | Scenario progress                        | 0 of 43 done (catalogue retained)                                                                                                  |
 
+## Stage 1C — Private-only DEV integration accepted (2026-10-20)
+
+**Checkpoint:** `STAGE1C_INTERNAL_DATABASE_AND_CRUD_ACCEPTED`.
+
+**Approved decision:** Internal DEV acceptance uses existing
+ClusterIP Services. External ALB routing is deferred and has
+not been tested or passed.
+
+**Verified application integration:**
+- Frontend HTTP 200.
+- Nginx `/api/` proxy HTTP 200.
+- FastAPI liveness, readiness and metrics HTTP 200.
+- `stage3-dev` and `platform-root` previously Synced/Healthy.
+- Root Argo CD automatic synchronization disabled.
+- AWS Load Balancer Controller Healthy/OutOfSync drift recorded.
+- Five Alembic revisions successfully applied to DEV database `app`.
+- Final revision `fe56fa70289e`, UUID identifiers, ownership
+  constraints and restricted runtime DML permissions verified.
+- Dedicated ordinary DEV demo user authenticated and retained.
+- PostgreSQL-backed disposable Items create/read/delete passed,
+  with cleanup verified.
+- Temporary localhost port-forward terminated.
+
+**Private acceptance evidence:**
+- `.private-evidence/lifecycle/stage1c-offline-migration-20261020T024535Z/`
+- `.private-evidence/lifecycle/stage1c-live-preflight-20261020T024653Z/`
+- `.private-evidence/lifecycle/stage1c-migration-role-20261020T024843Z/`
+- `.private-evidence/lifecycle/stage1c-live-db-20261020T111945Z/`
+- `.private-evidence/lifecycle/stage1c-demo-20261020T112423Z/`
+
+**Troubleshooting incident for MkDocs:**
+- Symptom: DEV registration returned HTTP 500.
+- Investigation: PostgreSQL raised `UndefinedTable` for `"user"`.
+- Root cause: The DEV application schema had not been initialized
+  through Alembic.
+- Remediation: Five existing migrations rehearsed against
+  disposable PostgreSQL and then applied using the approved
+  migration identity.
+- Validation: Schema revision and constraints verified;
+  demo-user authentication and Items CRUD passed.
+- Prevention: Lifecycle Batch 2 must validate database identity,
+  Alembic revision, required tables, application permissions
+  and schema readiness after RDS recreation, before declaring
+  application recovery complete.
+
+**Remaining work:** Stage 1D observability; full lifecycle
+certification; QA/PROD-like promotion; six troubleshooting
+waves covering all 43 scenarios; separately approved external
+ALB acceptance; final sanitized MkDocs publication.
+
+**Preserved checkpoints:** `PHASE4_ACCEPTED` and
+`BATCH1_MERGED_AND_ACCEPTED`. No changes to CI/CD controls,
+ECR publication policy, GitOps root manual synchronization or
+destructive-operation approval requirements.
+
 ## Current accepted engineering checkpoints
 
 ### Batch 1 Lifecycle Safety Hardening (2026-10-20)
