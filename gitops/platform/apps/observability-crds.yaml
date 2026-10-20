@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: observability-crds
+  namespace: argocd
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/jrikobd-azaws/aws-eks-platform-reliability-lab.git
+    targetRevision: main
+    path: gitops/platform/crds/observability
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: platform-system
+  syncPolicy:
+    syncOptions:
+      - ServerSideApply=true
+      - ClientSideApplyMigration=false
+      - CreateNamespace=false
+      - Prune=false
