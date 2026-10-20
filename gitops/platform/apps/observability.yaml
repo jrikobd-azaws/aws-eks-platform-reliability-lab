@@ -22,4 +22,5 @@ spec:
   syncPolicy:
     syncOptions:
       - ServerSideApply=true
+      - ClientSideApplyMigration=false
       - CreateNamespace=false
