@@ -4,41 +4,43 @@ metadata:
   name: platform
   namespace: argocd
   annotations:
-    argocd.argoproj.io/sync-wave: "-2"
+    argocd.argoproj.io/sync-wave: '-2'
 spec:
-  description: Platform controllers and dev namespace resources for the disposable EKS lab.
+  description: Platform controllers and dev namespace resources for the disposable
+    EKS lab.
   sourceRepos:
-    - https://aws.github.io/eks-charts
-    - https://charts.external-secrets.io
-    - https://github.com/jrikobd-azaws/aws-eks-platform-reliability-lab.git
+  - https://aws.github.io/eks-charts
+  - https://charts.external-secrets.io
+  - https://github.com/jrikobd-azaws/aws-eks-platform-reliability-lab.git
+  - https://prometheus-community.github.io/helm-charts
   destinations:
-    - server: https://kubernetes.default.svc
-      namespace: argocd
-    - server: https://kubernetes.default.svc
-      namespace: kube-system
-    - server: https://kubernetes.default.svc
-      namespace: platform-system
-    - server: https://kubernetes.default.svc
-      namespace: dev
+  - server: https://kubernetes.default.svc
+    namespace: argocd
+  - server: https://kubernetes.default.svc
+    namespace: kube-system
+  - server: https://kubernetes.default.svc
+    namespace: platform-system
+  - server: https://kubernetes.default.svc
+    namespace: dev
   namespaceResourceWhitelist:
-    - group: "*"
-      kind: "*"
+  - group: '*'
+    kind: '*'
   clusterResourceWhitelist:
-    - group: ""
-      kind: Namespace
-    - group: storage.k8s.io
-      kind: StorageClass
-    - group: networking.k8s.io
-      kind: IngressClass
-    - group: elbv2.k8s.aws
-      kind: IngressClassParams
-    - group: apiextensions.k8s.io
-      kind: CustomResourceDefinition
-    - group: rbac.authorization.k8s.io
-      kind: ClusterRole
-    - group: rbac.authorization.k8s.io
-      kind: ClusterRoleBinding
-    - group: admissionregistration.k8s.io
-      kind: ValidatingWebhookConfiguration
-    - group: admissionregistration.k8s.io
-      kind: MutatingWebhookConfiguration
+  - group: ''
+    kind: Namespace
+  - group: storage.k8s.io
+    kind: StorageClass
+  - group: networking.k8s.io
+    kind: IngressClass
+  - group: elbv2.k8s.aws
+    kind: IngressClassParams
+  - group: apiextensions.k8s.io
+    kind: CustomResourceDefinition
+  - group: rbac.authorization.k8s.io
+    kind: ClusterRole
+  - group: rbac.authorization.k8s.io
+    kind: ClusterRoleBinding
+  - group: admissionregistration.k8s.io
+    kind: ValidatingWebhookConfiguration
+  - group: admissionregistration.k8s.io
+    kind: MutatingWebhookConfiguration

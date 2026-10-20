@@ -1,0 +1,18 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fastapi-dev
+  namespace: platform-system
+  labels:
+    release: observability
+spec:
+  namespaceSelector:
+    matchNames:
+    - dev
+  selector:
+    matchLabels:
+      app: eks-platform-backend
+  endpoints:
+  - path: /metrics
+    interval: 30s
+    targetPort: 8000

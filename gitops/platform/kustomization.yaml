@@ -10,3 +10,6 @@ resources:
 - apps/external-secrets.yaml
 - apps/dev-secrets.yaml
 - stage3-dev.yaml
+- apps/observability.yaml
+- dashboards/fastapi-service-monitor.yaml
+- dashboards/fastapi-dashboard-configmap.yaml
