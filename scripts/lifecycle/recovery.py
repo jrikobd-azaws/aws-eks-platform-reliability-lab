@@ -358,13 +358,36 @@ def check_db_fresh(config,values,manifest):
 
 def restore_database(config, manifest_path):
     account_guard(config)
-    manifest=json.loads(Path(manifest_path).read_text())
+    if not manifest_path:
+        raise LifecycleError('Recovery manifest path required')
+    raw_manifest = Path(manifest_path)
+    if raw_manifest.is_symlink():
+        raise LifecycleError('Symlink recovery manifest refused')
+    manifest_file = raw_manifest.resolve()
+    if manifest_file.is_symlink() or not manifest_file.is_file():
+        raise LifecycleError('Recovery manifest missing or invalid')
+    evidence_boundary = Path(config.evidence_dir).resolve()
+    if not manifest_file.is_relative_to(evidence_boundary):
+        raise LifecycleError('Recovery manifest must reside within approved evidence directory')
+    manifest=json.loads(manifest_file.read_text())
     values,host,db=database_connection(config)
     if manifest['account']!=config.expected_account_id or manifest['cluster']!=config.cluster_name or manifest['database']!=db:
         raise LifecycleError('Backup belongs to another environment')
     check_db_fresh(config,values,manifest)
-    key=age_identity(); encrypted=Path(manifest['database_backup'])
-    if not encrypted.is_file() or sha256_file(encrypted)!=manifest['database_sha256']:
+    key=age_identity()
+    raw_encrypted = Path(manifest.get('database_backup', ''))
+    if raw_encrypted.is_symlink():
+        raise LifecycleError('Symlink database backup archive refused')
+    encrypted = raw_encrypted.resolve()
+    if encrypted.is_symlink() or not encrypted.is_file():
+        raise LifecycleError('Encrypted database backup missing or invalid')
+    allowed_backup_roots = (
+        evidence_boundary,
+        (Path.home() / '.local/share/eks-lab-backups').resolve(),
+    )
+    if not any(encrypted.is_relative_to(root) for root in allowed_backup_roots):
+        raise LifecycleError('Encrypted database backup outside authorized storage boundaries')
+    if sha256_file(encrypted)!=manifest['database_sha256']:
         raise LifecycleError('Encrypted backup checksum mismatch')
     archive=call(['age','-d','-i',str(key),str(encrypted)])
     call(['pg_restore','--list'],data=archive)

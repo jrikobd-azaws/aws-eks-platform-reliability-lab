@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -135,10 +136,34 @@ def validate_destroy_plan(
     }
 
 
+ALLOWED_FILE_BOUNDARIES = (
+    ROOT.resolve(),
+    (Path.home() / ".local/share/eks-lab-backups").resolve(),
+    Path(tempfile.gettempdir()).resolve(),
+)
+
+
+def validate_path_boundary(path: Path, allowed_roots: tuple[Path, ...] = ALLOWED_FILE_BOUNDARIES, description: str = "file") -> Path:
+    if not path:
+        raise LifecycleError(f"{description} path required")
+    original = Path(path)
+    if original.is_symlink():
+        raise LifecycleError(f"Symlink {description} refused")
+    resolved = original.resolve()
+    if resolved.is_symlink():
+        raise LifecycleError(f"Symlink {description} refused")
+    if not resolved.is_file():
+        raise LifecycleError(f"{description} does not exist or is not a regular file")
+    if not any(resolved.is_relative_to(root) for root in allowed_roots):
+        raise LifecycleError(f"{description} is outside authorized path boundaries")
+    return resolved
+
+
 def sha256_file(path: Path) -> str:
+    validated_path = validate_path_boundary(Path(path), description="Target file")
     digest = hashlib.sha256()
 
-    with path.open("rb") as stream:
+    with validated_path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
 
@@ -482,10 +507,43 @@ import sys
 import tarfile
 TF=ROOT/"infra/terraform/environments/lab"
 BASE=ROOT/".private-evidence/lifecycle"
+ALLOWED_COMMAND_BINARIES = frozenset({
+    "aws",
+    "terraform",
+    "kubectl",
+    "helm",
+    "pg_restore",
+    "age",
+    "python",
+    "python3",
+    Path(sys.executable).name,
+})
+
+
+def validate_command_argv(argv):
+    if not argv:
+        raise LifecycleError("Empty command")
+    prog = str(argv[0])
+    prog_path = Path(prog)
+    if prog_path.name not in ALLOWED_COMMAND_BINARIES:
+        raise LifecycleError(f"Unauthorized command binary: {prog_path.name}")
+    if prog_path.parent != Path("."):
+        if prog_path.resolve() != Path(sys.executable).resolve():
+            raise LifecycleError("Unauthorized executable path")
+    validated = []
+    for arg in argv:
+        s = str(arg)
+        if "\x00" in s or "\r" in s:
+            raise LifecycleError("Command argument contains illegal control characters")
+        validated.append(s)
+    return validated
+
+
 def call(argv, *, data=None, timeout=1200, env=None):
     """Binary-safe subprocess call; never display stderr, which may contain secrets."""
+    checked_argv = validate_command_argv(argv)
     try:
-        return subprocess.run([str(x) for x in argv], cwd=ROOT, env=env,
+        return subprocess.run(checked_argv, cwd=ROOT, env=env,
             input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=timeout, check=True).stdout
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -580,7 +638,14 @@ def create_plan(config, tfvars, kind):
 
 def execute_plan(config, report, confirmation, tfvars):
     account_guard(config)
-    path=Path(report).resolve()
+    if not report:
+        raise LifecycleError('Plan report path required')
+    raw_path = Path(report)
+    if raw_path.is_symlink():
+        raise LifecycleError('Symlink plan report refused')
+    path = raw_path.resolve()
+    if path.is_symlink():
+        raise LifecycleError('Symlink plan report refused')
     if not path.is_file() or not path.is_relative_to(BASE.resolve()):
         raise LifecycleError('Plan report must exist under private lifecycle evidence')
     info=json.loads(path.read_text())
@@ -594,9 +659,16 @@ def execute_plan(config, report, confirmation, tfvars):
     var=checked_inputs(tfvars)
     if sha256_file(var)!=info['tfvars_sha256']:
         raise LifecycleError('Terraform inputs changed since plan')
-    saved=Path(info['plan'])
-    if not saved.is_file() or sha256_file(saved)!=info['plan_sha256']:
-        raise LifecycleError('Saved plan missing or altered')
+    raw_plan = Path(info.get('plan', ''))
+    if raw_plan.is_symlink():
+        raise LifecycleError('Symlink saved plan refused')
+    saved = raw_plan.resolve()
+    if saved.is_symlink() or not saved.is_file():
+        raise LifecycleError('Saved plan missing or invalid')
+    if not saved.is_relative_to(BASE.resolve()):
+        raise LifecycleError('Saved plan must exist under private lifecycle evidence')
+    if sha256_file(saved)!=info['plan_sha256']:
+        raise LifecycleError('Saved plan checksum mismatch')
     state=json.loads(call(['terraform',f'-chdir={TF}','state','pull'],env=environment(config)))
     if (state.get('lineage'),state.get('serial')) != (info['state_lineage'],info['state_serial']):
         raise LifecycleError('Terraform state changed since plan; replan')
