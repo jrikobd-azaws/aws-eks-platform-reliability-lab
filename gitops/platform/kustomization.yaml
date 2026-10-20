@@ -12,5 +12,3 @@ resources:
 - stage3-dev.yaml
 - apps/observability-crds.yaml
 - apps/observability.yaml
-- dashboards/fastapi-service-monitor.yaml
-- dashboards/fastapi-dashboard-configmap.yaml

@@ -17,6 +17,9 @@ spec:
     - repoURL: https://github.com/jrikobd-azaws/aws-eks-platform-reliability-lab.git
       targetRevision: main
       ref: values
+    - repoURL: https://github.com/jrikobd-azaws/aws-eks-platform-reliability-lab.git
+      targetRevision: main
+      path: gitops/platform/dashboards
   destination:
     server: https://kubernetes.default.svc
     namespace: platform-system
