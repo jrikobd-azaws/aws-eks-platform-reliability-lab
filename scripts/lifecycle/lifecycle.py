@@ -643,7 +643,7 @@ def create_plan(config, tfvars, kind):
     checked=assert_plan_policy(plan_json(config,saved),targets,action='delete' if kind=='shutdown' else 'create')
     # A rebuild must only create managed resources. Retained resources must be no-ops.
     summary={'schema':1,'kind':kind,'created_utc':utc_now(),'account':config.expected_account_id,
-        'region':config.aws_region,'cluster':config.cluster_name,'tfvars_sha256':sha256_file(var),
+        'region':config.aws_region,'cluster':config.cluster_name,'tfvars_sha256':sha256_approved_file(var),
         'plan':str(saved),'plan_sha256':sha256_file(saved),'targets':targets,'policy':checked,
         'state_lineage':None}
     state=json.loads(call(['terraform',f'-chdir={TF}','state','pull'],env=environment(config)))
