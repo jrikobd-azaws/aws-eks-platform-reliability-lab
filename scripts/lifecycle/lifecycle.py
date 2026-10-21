@@ -835,6 +835,19 @@ def discover_latest_backup_manifest(config):
     return _private_evidence_file(config, candidates[-1], "backup manifest")
 
 
+
+def sha256_approved_file(path: Path) -> str:
+    """Hash a file already validated against explicit recovery boundaries."""
+    path = Path(path)
+    if not path.is_file() or path.is_symlink():
+        raise LifecycleError("Approved archive file unavailable")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def validate_backup_manifest(config, manifest_path=None):
     _require_tools("age", "pg_restore", "git")
     latest = discover_latest_backup_manifest(config)
@@ -897,15 +910,25 @@ def validate_backup_manifest(config, manifest_path=None):
         ):
             raise LifecycleError("Historical backup restore-test provenance mismatch")
         _verify_backup_restore_order(data, restore)
+    # Historical recovery evidence may belong to an accepted
+    # certification worktree rather than the current checkout.
+    historical_roots = (
+        config.evidence_dir.resolve(),
+        (Path.home() / ".local/share/eks-lab-backups").resolve(),
+    )
     backup = validate_path_boundary(
-        Path(data.get("database_backup", "")), description="Encrypted database backup"
+        Path(data.get("database_backup", "")),
+        allowed_roots=historical_roots,
+        description="Encrypted database backup",
     )
     source = validate_path_boundary(
-        Path(data.get("source_archive", "")), description="Source checkpoint"
+        Path(data.get("source_archive", "")),
+        allowed_roots=historical_roots,
+        description="Source checkpoint",
     )
-    if sha256_file(backup) != data.get("database_sha256"):
+    if sha256_approved_file(backup) != data.get("database_sha256"):
         raise LifecycleError("Encrypted backup checksum mismatch")
-    if sha256_file(source) != data.get("source_sha256"):
+    if sha256_approved_file(source) != data.get("source_sha256"):
         raise LifecycleError("Source checkpoint checksum mismatch")
     key = age_identity()
     archive = call(["age", "-d", "-i", str(key), str(backup)])
