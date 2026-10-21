@@ -126,7 +126,12 @@ helm uninstall external-secrets --namespace platform-system
 kubectl apply -k gitops/argocd
 ```
 
-The root Application tracks `main`, auto-syncs baseline namespace/StorageClass/RBAC resources without pruning, and creates manual-sync child Applications. Merge the reviewed source to `main` before applying it. After confirming the Terraform-output markers have been replaced in the reviewed repository revision, sync the two pinned controller applications:
+The root Application tracks `main` with automatic synchronization disabled. An
+explicit manual root sync creates the baseline namespace/StorageClass/RBAC
+resources and manual-sync child Applications without pruning. Merge the
+reviewed source to `main` before applying it. After confirming the
+Terraform-output markers have been replaced in the reviewed repository
+revision, sync the two pinned controller applications:
 
 ```bash
 argocd app sync aws-load-balancer-controller
@@ -234,3 +239,47 @@ retention changes, and no additional CloudWatch agents required.
 
 Lifecycle Batch 2 certification must verify that the controller
 resource settings are reproducible after cluster recreation.
+
+### Lifecycle Batch 2 recovery controller
+
+`scripts/lifecycle/recover_platform.py` preserves the existing
+`labctl native-platform-restore` entry point and records an atomic private
+checkpoint after each independently revalidated stage. A retry first reads
+actual Helm, Argo CD and Kubernetes state; API errors fail closed and do not
+authorize a write merely because a checkpoint is incomplete.
+
+The controller restores the Argo CD AppProjects before their Applications,
+uses explicit manual `argocd app sync` operations, establishes the approved
+ten Prometheus Operator CRDs before the monitoring workload, and creates the
+Grafana administrator Secret only from an interactive `/dev/tty` prompt. The
+Secret payload is passed on standard input and is not written to arguments,
+logs, checkpoints or evidence.
+
+Database restore remains the existing separately confirmed
+`native-database-restore` operation. Execute-mode recovery then validates the
+exact RDS identity, Alembic head `fe56fa70289e`, required UUID tables,
+`app_runtime` DML access without schema `CREATE`, immutable Stage 3 images and
+FastAPI live, ready and metrics endpoints. A partial or non-empty database is
+not automatically dropped, downgraded or restored.
+
+### Backup-bound shutdown certification
+
+`native-restore-test` requires an account- and backup-hash-bound confirmation
+before creating a uniquely named `restore_test_*` database. It restores the
+current approved encrypted backup without targeting the live `app` database,
+verifies Alembic `fe56fa70289e`, UUID relations and restricted `app_runtime`
+DML, then proves the disposable database, validation pod and credential Secret
+are absent. Any restore, validation or cleanup uncertainty records failed
+private evidence and blocks shutdown certification.
+
+After reviewing the exact native shutdown plan, `native-shutdown-certify`
+requires a confirmation bound to that plan's SHA-256. It rechecks Terraform
+state lineage and serial, protected resources, load-balancer and storage
+dependencies, Argo CD destination identity and manual synchronization. Only
+then does it atomically create `.private-evidence/lifecycle/shutdown-readiness.json`.
+The record expires after 24 hours and is still not permission to execute the
+saved destroy plan.
+
+### Final-backup freshness requirement
+
+Shutdown certification requires an encrypted backup created within the approved 24-hour window and a successful restore test performed after that exact backup. Application writes after the final backup invalidate the recovery-point assumption: create a new encrypted backup and complete a new restore test before destruction.
