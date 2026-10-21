@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from bootstrap import RecoveryBootstrap
 from foundation import (
     ROOT,
     CheckpointStore,
@@ -38,6 +39,7 @@ class RecoveryManager:
     config: LabConfig
     runner: CommandRunner
     checkpoint: CheckpointStore
+    bootstrap: RecoveryBootstrap | None = None
 
     def command(self, args, timeout=900):
         return self.runner.run(args, timeout=timeout)
@@ -268,6 +270,13 @@ class RecoveryManager:
 
     def resume(self, *, execute=False):
         self.account_guard()
+        if self.bootstrap:
+            identity = self.bootstrap.prepare(auto_repair=execute)
+            reused = self.checkpoint.reconcile_identity(
+                identity.checkpoint_identity()
+            )
+            state = "reused" if reused else "established"
+            print(f"INFO: recovery checkpoint identity {state}", flush=True)
 
         actions = {
             "infrastructure": self.restore_infrastructure,

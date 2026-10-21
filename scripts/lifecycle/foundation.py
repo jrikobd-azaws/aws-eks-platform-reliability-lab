@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -40,6 +41,27 @@ class LabConfig:
         cluster = os.getenv(
             "LAB_CLUSTER_NAME", "eks-platform-reliability-lab"
         )
+        evidence_value = os.getenv("LAB_LIFECYCLE_EVIDENCE_DIR")
+        evidence = Path(evidence_value).expanduser() if evidence_value else EVIDENCE
+        if not evidence_value and not (evidence / "python-platform-recovery-checkpoint.json").is_file():
+            # Reuse one existing authoritative checkpoint across clean worktrees.
+            # Never create a competing checkpoint when historical identity is ambiguous.
+            candidates = []
+            projects = Path.home() / "projects"
+            if projects.is_dir():
+                for candidate in projects.glob("aws-eks-*/.private-evidence/lifecycle"):
+                    checkpoint = candidate / "python-platform-recovery-checkpoint.json"
+                    if (checkpoint.is_file() and not checkpoint.is_symlink() and
+                            not (candidate.is_symlink() and not candidate.resolve().is_dir())):
+                        candidates.append(candidate.resolve())
+            unique = sorted(set(candidates))
+            if len(unique) == 1:
+                evidence = unique[0]
+            elif len(unique) > 1:
+                raise LifecycleError("Multiple authoritative recovery checkpoints; select verified evidence explicitly")
+
+        if not evidence.is_absolute():
+            raise LifecycleError("Lifecycle evidence directory must be absolute")
 
         if not re.fullmatch(r"[0-9]{12}", account):
             raise LifecycleError("Invalid AWS account ID")
@@ -55,6 +77,7 @@ class LabConfig:
             aws_region=region,
             expected_account_id=account,
             cluster_name=cluster,
+            evidence_dir=evidence,
         )
 
     def environment(self) -> dict[str, str]:
@@ -77,6 +100,15 @@ def redact(text: str, secrets: Sequence[str] = ()) -> str:
     for secret in secrets:
         if secret:
             result = result.replace(secret, "[REDACTED]")
+
+    result = re.sub(
+        r"(?i)\b(password|passwd|token|authorization|secret|connection[-_ ]?string)\b"
+        r"\s*[:=]\s*\S+",
+        r"\1=[REDACTED]",
+        result,
+    )
+    result = re.sub(r"(?i)postgres(?:ql)?://\S+", "[REDACTED_DSN]", result)
+    result = re.sub(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", "[REDACTED_AWS_KEY]", result)
 
     return result
 
@@ -162,6 +194,64 @@ class CheckpointStore:
 
         atomic_json_write(self.path, data)
 
+    def reconcile_identity(self, identity: Mapping[str, Any]) -> bool:
+        """Bind checkpoints to verified infrastructure and source identity.
+
+        Returns True when an existing binding was reused. A genuine identity
+        change invalidates stage completion locally; malformed or partial
+        identity data fails closed instead of making historical evidence valid.
+        """
+        required = {
+            "account_id", "region", "cluster_arn", "terraform_workspace",
+            "terraform_lineage", "terraform_serial", "source_revision",
+            "evidence_root",
+        }
+        if set(identity) != required or any(
+            value in (None, "") for value in identity.values()
+        ):
+            raise LifecycleError("Incomplete recovery checkpoint identity")
+
+        normalized = {key: identity[key] for key in sorted(required)}
+        fingerprint = hashlib.sha256(
+            json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        data = self.load()
+        existing = data.get("identity")
+        if existing is not None and not isinstance(existing, dict):
+            raise LifecycleError("Invalid checkpoint identity")
+
+        if existing:
+            stored_values = existing.get("values")
+            stored_fingerprint = existing.get("fingerprint")
+            if not isinstance(stored_values, dict) or not isinstance(stored_fingerprint, str):
+                raise LifecycleError("Invalid checkpoint identity")
+            calculated = hashlib.sha256(
+                json.dumps(stored_values, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            if calculated != stored_fingerprint:
+                raise LifecycleError("Checkpoint identity fingerprint mismatch")
+
+        stable = ("account_id", "region", "cluster_arn", "terraform_workspace", "terraform_lineage", "evidence_root")
+        reused = bool(existing and all(
+            existing["values"].get(key) == normalized[key] for key in stable
+        ))
+        if not reused:
+            for stage, stage_info in data["stages"].items():
+                if stage_info.get("status") in {"passed", "running"}:
+                    data["stages"][stage] = {
+                        "status": "pending",
+                        "updated_utc": utc_now(),
+                        "detail": "Invalidated after verified identity change",
+                    }
+
+        data["identity"] = {
+            "fingerprint": fingerprint,
+            "values": normalized,
+            "updated_utc": utc_now(),
+        }
+        atomic_json_write(self.path, data)
+        return reused
+
     def completed(self, stage: str) -> bool:
         return (
             self.load()["stages"].get(stage, {}).get("status")
@@ -188,6 +278,7 @@ class CommandRunner:
         timeout: int = 900,
         cwd: Path | None = None,
         secrets: Sequence[str] = (),
+        env: Mapping[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
 
         command = [str(value) for value in args]
@@ -210,7 +301,7 @@ class CommandRunner:
             return subprocess.run(
                 command,
                 cwd=cwd or ROOT,
-                env=self.config.environment(),
+                env=dict(env) if env is not None else self.config.environment(),
                 text=True,
                 capture_output=True,
                 timeout=timeout,
@@ -223,15 +314,25 @@ class CommandRunner:
             ) from exc
 
         except subprocess.CalledProcessError as exc:
-            raw_err = exc.stderr or exc.stdout or ""
-            message = redact(
-                (raw_err or "")[-1200:],
-                secrets,
+            raw_err = (exc.stderr or exc.stdout or "").lower()
+            patterns = (
+                ("BACKEND_NOT_INITIALIZED", "backend initialization required"),
+                ("BACKEND_NOT_INITIALIZED", "terraform init"),
+                ("AWS_AUTHENTICATION", "expiredtoken"),
+                ("AWS_AUTHENTICATION", "invalidclienttokenid"),
+                ("ACCESS_DENIED", "accessdenied"),
+                ("KUBERNETES_AUTH", "unauthorized"),
+                ("KUBERNETES_AUTH", "forbidden"),
+                ("TIMEOUT", "deadline exceeded"),
+                ("ARGOCD_AUTH", "unauthenticated"),
+                ("RESOURCE_CONFLICT", "alreadyexists"),
             )
-
+            category = next((label for label, phrase in patterns if phrase in raw_err),
+                            "UNCLASSIFIED")
+            # Never emit arbitrary stderr: provider output may include secrets.
             raise LifecycleError(
-                f"Command failed: {command[0]} "
-                f"(exit={exc.returncode}): {message}"
+                f"Command failed: {Path(command[0]).name} "
+                f"(exit={exc.returncode}; category={category}; private stderr [REDACTED])"
             ) from None
 
 

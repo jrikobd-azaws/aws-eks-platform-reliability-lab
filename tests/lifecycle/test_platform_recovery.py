@@ -16,11 +16,27 @@ from recover_platform import (
     ALEMBIC_HEAD,
     GRAFANA_SECRET,
     OBSERVABILITY_CRDS,
+    OBSERVABILITY_WORKLOADS,
     PLATFORM_STAGES,
     STAGE3_REVISION,
     PlatformRecovery,
     validate_source_contract,
 )
+
+
+def ready_workload(kind, name, uid):
+    return {
+        "kind": kind.title(),
+        "metadata": {"name": name, "uid": uid, "generation": 1, "namespace": "platform-system",
+                     "labels": ({"app.kubernetes.io/managed-by": "prometheus-operator", "release": "observability"}
+                                if kind.lower() == "statefulset" else {"app.kubernetes.io/instance": "observability"})},
+        "spec": {"replicas": 1},
+        "status": {
+            "observedGeneration": 1,
+            "readyReplicas": 1,
+            "availableReplicas": 1,
+        },
+    }
 
 
 def manager(tmp_path, executor=None):
@@ -194,6 +210,67 @@ def test_public_cli_contract_is_preserved():
     source = (ROOT / "scripts/lifecycle/labctl.py").read_text(encoding="utf-8")
     assert "native-platform-restore" in source
     assert "platform(config)" in source
+
+
+def _observability_manager(tmp_path, overrides=None):
+    recovery = manager(tmp_path)
+    recovery._get_application = Mock(return_value={
+        "spec": {"syncPolicy": {}, "sources": [{}, {}, {}]},
+        "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}},
+    })
+    items = [ready_workload(kind, name, f"uid-{i}")
+             for i, (kind, name, _) in enumerate(OBSERVABILITY_WORKLOADS)]
+    overrides = overrides or {}
+    for index, item in overrides.items():
+        items[index] = item
+    recovery.json = Mock(side_effect=lambda args: {
+        "items": [item for item in items if item is not None and
+                  item["kind"].lower() == args[args.index("get") + 1] and
+                  ((item["metadata"]["labels"].get("release") == "observability")
+                   if "release=observability" in args[args.index("-l") + 1]
+                   else item["metadata"]["labels"].get("app.kubernetes.io/instance") == "observability")]
+    })
+    return recovery
+
+
+def test_observability_readiness_uses_component_selectors(tmp_path):
+    recovery = _observability_manager(tmp_path)
+    assert recovery.observability_ready() is True
+    selectors = [call.args[0][call.args[0].index("-l") + 1]
+                 for call in recovery.json.call_args_list]
+    assert selectors == [item[2] for item in OBSERVABILITY_WORKLOADS]
+    assert "release=observability" in selectors[0]
+
+
+def test_observability_missing_operator_resource_fails_closed(tmp_path):
+    assert _observability_manager(tmp_path, {0: None}).observability_ready() is False
+
+
+def test_observability_unready_resource_fails_closed(tmp_path):
+    bad = ready_workload("statefulset", OBSERVABILITY_WORKLOADS[0][1], "uid-1")
+    bad["status"]["readyReplicas"] = 0
+    assert _observability_manager(tmp_path, {0: bad}).observability_ready() is False
+
+
+def test_observability_wrong_owner_fails_closed(tmp_path):
+    bad = ready_workload("statefulset", OBSERVABILITY_WORKLOADS[0][1], "uid-1")
+    bad["metadata"]["labels"]["app.kubernetes.io/managed-by"] = "untrusted"
+    with pytest.raises(LifecycleError, match="ownership mismatch"):
+        _observability_manager(tmp_path, {0: bad}).observability_ready()
+
+
+def test_observability_conflicting_duplicate_identity_fails_closed(tmp_path):
+    recovery = _observability_manager(tmp_path)
+    first = ready_workload("statefulset", OBSERVABILITY_WORKLOADS[0][1], "uid-1")
+    second = ready_workload("statefulset", OBSERVABILITY_WORKLOADS[0][1], "uid-2")
+    recovery.json = Mock(return_value={"items": [first, second]})
+    with pytest.raises(LifecycleError, match="Duplicate observability"):
+        recovery.observability_ready()
+
+
+def test_external_secrets_server_side_apply_contract_preserved():
+    source = (ROOT / "gitops/platform/apps/external-secrets.yaml").read_text()
+    assert "ServerSideApply=true" in source
 
 
 def test_root_sync_is_resource_scoped(tmp_path):

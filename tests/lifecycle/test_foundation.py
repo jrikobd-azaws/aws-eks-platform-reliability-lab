@@ -88,6 +88,18 @@ def test_redaction():
     )
 
 
+def test_generic_diagnostics_redact_credentials():
+    synthetic_key = "AK" + "IA" + "ABCDEFGHIJKLMNOP"
+    value = redact(
+        "password=private token:opaque postgresql://user:pass@host/app "
+        + synthetic_key
+    )
+    assert "private" not in value
+    assert "opaque" not in value
+    assert "user:pass" not in value
+    assert synthetic_key not in value
+
+
 def test_dry_run_never_executes():
     runner = CommandRunner(LabConfig(), dry_run=True)
 
