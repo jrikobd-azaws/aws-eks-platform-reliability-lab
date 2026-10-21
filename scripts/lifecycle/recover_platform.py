@@ -12,7 +12,9 @@ import getpass
 import json
 import re
 import secrets
+import shutil
 import sys
+import warnings
 from dataclasses import dataclass
 from typing import Callable
 
@@ -218,6 +220,8 @@ class PlatformRecovery:
                 "aws", "eks", "update-kubeconfig", "--name", self.config.cluster_name,
                 "--region", self.config.aws_region, "--alias", "eks-reliability-lab",
             ])
+        context = self.text(["kubectl", "config", "current-context"])
+        _require(bool(context), "Kubeconfig current context is unavailable")
         server = self.text([
             "kubectl", "config", "view", "--minify",
             "-o", "jsonpath={.clusters[0].cluster.server}",
@@ -244,6 +248,11 @@ class PlatformRecovery:
     def _verified_argocd_application(self, name: str) -> dict:
         """Verify CLI and Kubernetes identify the same approved Application."""
         self.verify_identity(update_kubeconfig=False)
+        _require(
+            shutil.which("argocd", path=environment(self.config).get("PATH"))
+            is not None,
+            "Argo CD CLI is unavailable on PATH",
+        )
 
         live = self._get_application(name)
         metadata = live.get("metadata", {})
@@ -633,13 +642,26 @@ class PlatformRecovery:
 
     def _grafana_credentials(self) -> tuple[str, str]:
         try:
-            with open("/dev/tty", "r+", encoding="utf-8") as terminal:
-                terminal.write("Grafana admin user [admin]: ")
-                terminal.flush()
-                username = terminal.readline().strip() or "admin"
-                password = getpass.getpass("Grafana admin password: ", stream=terminal)
-                confirm = getpass.getpass("Confirm Grafana admin password: ", stream=terminal)
-        except OSError as exc:
+            # Separate descriptors avoid direction changes on a non-seekable TTY.
+            with (
+                open("/dev/tty", "r", encoding="utf-8", buffering=1) as terminal_in,
+                open("/dev/tty", "w", encoding="utf-8", buffering=1) as terminal_out,
+            ):
+                terminal_out.write("Grafana admin user [admin]: ")
+                terminal_out.flush()
+                raw_username = terminal_in.readline()
+                if not raw_username:
+                    raise EOFError("Interactive terminal closed")
+                username = raw_username.strip() or "admin"
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", getpass.GetPassWarning)
+                    password = getpass.getpass(
+                        "Grafana admin password: ", stream=terminal_out
+                    )
+                    confirm = getpass.getpass(
+                        "Confirm Grafana admin password: ", stream=terminal_out
+                    )
+        except (OSError, EOFError, getpass.GetPassWarning) as exc:
             raise LifecycleError("Interactive terminal required for Grafana Secret") from exc
         _require(password == confirm, "Grafana passwords do not match")
         _require(len(password) >= 16, "Grafana password must be at least 16 characters")
@@ -752,6 +774,7 @@ class PlatformRecovery:
         action: Callable[[], None],
     ) -> None:
         _require(name in PLATFORM_STAGES, "Unknown platform recovery stage")
+        print(f"INFO: {name}: checking current state", flush=True)
         try:
             already_ready = ready()
         except Exception as exc:
@@ -763,6 +786,7 @@ class PlatformRecovery:
             return
 
         self.checkpoint.update(name, "running")
+        print(f"INFO: {name}: starting approved recovery action", flush=True)
         try:
             action()
             _require(ready(), f"{name} action completed but acceptance failed")
@@ -981,9 +1005,24 @@ def main() -> None:
     print(json.dumps(report, indent=2))
 
 
+def sanitized_failure(exc: Exception) -> str:
+    """Return actionable diagnostics without emitting arbitrary exception data."""
+    if not isinstance(exc, LifecycleError):
+        return f"BLOCKED: {type(exc).__name__}"
+    detail = " ".join(str(exc).split())
+    detail = re.sub(
+        r"(?i)\b(password|token|authorization|connection[-_ ]?string)\b"
+        r"\s*[:=]\s*\S+",
+        r"\1=[REDACTED]",
+        detail,
+    )
+    detail = re.sub(r"(?i)postgres(?:ql)?://\S+", "[REDACTED_DSN]", detail)
+    return f"BLOCKED: LifecycleError: {detail[:400]}"
+
+
 if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        print(f"BLOCKED: {type(exc).__name__}", file=sys.stderr)
+        print(sanitized_failure(exc), file=sys.stderr)
         sys.exit(1)

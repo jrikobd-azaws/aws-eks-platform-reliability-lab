@@ -556,8 +556,16 @@ def call(argv, *, data=None, timeout=1200, env=None):
         return subprocess.run(checked_argv, cwd=ROOT, env=env,
             input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=timeout, check=True).stdout
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        raise LifecycleError('Command failed or timed out: '+str(argv[0])+' (private stderr suppressed)') from None
+    except subprocess.TimeoutExpired:
+        raise LifecycleError(
+            f'Command timed out: {argv[0]} after {timeout}s '
+            '(private stderr suppressed)'
+        ) from None
+    except subprocess.CalledProcessError as exc:
+        raise LifecycleError(
+            f'Command failed: {argv[0]} (exit={exc.returncode}; '
+            'private stderr suppressed)'
+        ) from None
 
 def output(argv, **kwargs):
     return call(argv, **kwargs).decode().strip()
