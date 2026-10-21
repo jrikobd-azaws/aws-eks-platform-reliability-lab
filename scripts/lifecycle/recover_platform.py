@@ -18,6 +18,7 @@ import warnings
 from dataclasses import dataclass
 from typing import Callable
 
+from bootstrap import RecoveryBootstrap
 from foundation import (
     CheckpointStore,
     LabConfig,
@@ -63,6 +64,17 @@ PLATFORM_STAGES = (
     "grafana_secret",
     "observability",
     "stage3_application",
+)
+
+OBSERVABILITY_WORKLOADS = (
+    ("statefulset", "prometheus-observability-prometheus",
+     "app.kubernetes.io/managed-by=prometheus-operator,release=observability"),
+    ("statefulset", "alertmanager-observability-alertmanager",
+     "app.kubernetes.io/managed-by=prometheus-operator,release=observability"),
+    ("deployment", "observability-grafana",
+     "app.kubernetes.io/instance=observability"),
+    ("deployment", "observability-kube-state-metrics",
+     "app.kubernetes.io/instance=observability"),
 )
 
 
@@ -169,6 +181,7 @@ class PlatformRecovery:
     config: LabConfig
     checkpoint: CheckpointStore
     executor: Executor = call
+    bootstrap: RecoveryBootstrap | None = None
 
     def run(self, args, *, data: bytes | None = None, timeout: int = 1200) -> bytes:
         return self.executor(
@@ -693,28 +706,42 @@ class PlatformRecovery:
             len(application.get("spec", {}).get("sources", [])) == 3,
             "Observability Application is not the approved three-source definition",
         )
-        workloads = self.json([
-            "kubectl", "-n", "platform-system", "get", "deployment,statefulset",
-            "-l", "app.kubernetes.io/instance=observability", "-o", "json",
-        ]).get("items", [])
-        named_kinds = {
-            (
-                item.get("kind", ""),
-                item.get("metadata", {}).get("name", ""),
-            )
-            for item in workloads
-        }
-        required = (
-            any(kind == "StatefulSet" and name.startswith("prometheus-")
-                for kind, name in named_kinds),
-            any(kind == "StatefulSet" and name.startswith("alertmanager-")
-                for kind, name in named_kinds),
-            any(kind == "Deployment" and "grafana" in name
-                for kind, name in named_kinds),
-            any(kind == "Deployment" and "kube-state-metrics" in name
-                for kind, name in named_kinds),
-        )
-        return all(required) and all(_resource_ready(item) for item in workloads)
+        workloads = []
+        seen: set[tuple[str, str, str]] = set()
+        # The Prometheus Operator owns StatefulSets with component-specific
+        # instance labels; Helm release Deployments use instance=observability.
+        for kind, expected_name, selector in OBSERVABILITY_WORKLOADS:
+            matches = self.json([
+                "kubectl", "-n", "platform-system", "get", kind,
+                "-l", selector, "-o", "json",
+            ]).get("items", [])
+            if not isinstance(matches, list):
+                raise LifecycleError("Invalid observability workload response")
+            selected = [item for item in matches if
+                        item.get("metadata", {}).get("name") == expected_name]
+            if len(selected) != 1:
+                if len(selected) > 1:
+                    raise LifecycleError("Duplicate observability workload identity")
+                return False
+            item = selected[0]
+            metadata = item.get("metadata", {})
+            if (item.get("kind", "").lower() != kind or
+                    metadata.get("namespace", "platform-system") != "platform-system" or
+                    not metadata.get("uid")):
+                raise LifecycleError("Observability workload identity mismatch")
+            identity = ("platform-system", kind, expected_name)
+            if identity in seen:
+                raise LifecycleError("Duplicate observability workload identity")
+            seen.add(identity)
+            labels = metadata.get("labels", {})
+            if kind == "statefulset":
+                if (labels.get("app.kubernetes.io/managed-by") != "prometheus-operator" or
+                        labels.get("release") != "observability"):
+                    raise LifecycleError("Operator-managed workload ownership mismatch")
+            elif labels.get("app.kubernetes.io/instance") != "observability":
+                raise LifecycleError("Observability Deployment ownership mismatch")
+            workloads.append(item)
+        return all(_resource_ready(item) for item in workloads)
 
     def restore_observability(self) -> None:
         self._sync_application("observability", timeout=1800)
@@ -798,7 +825,14 @@ class PlatformRecovery:
 
     def recover(self) -> dict:
         validate_source_contract()
-        self.verify_identity()
+        if self.bootstrap:
+            identity = self.bootstrap.prepare(auto_repair=True)
+            reused = self.checkpoint.reconcile_identity(
+                identity.checkpoint_identity()
+            )
+            state = "reused" if reused else "established"
+            print(f"INFO: platform checkpoint identity {state}", flush=True)
+        self.verify_identity(update_kubeconfig=self.bootstrap is None)
         actions = (
             ("argocd", self.argocd_ready, self.restore_argocd),
             (
@@ -815,8 +849,14 @@ class PlatformRecovery:
             ("grafana_secret", self.grafana_secret_ready, self.restore_grafana_secret),
             ("observability", self.observability_ready, self.restore_observability),
         )
-        for name, ready, action in actions:
-            self.run_stage(name, ready, action)
+        self.run_stage(*actions[0])
+        if self.bootstrap:
+            with self.bootstrap.argocd_session():
+                for name, ready, action in actions[1:]:
+                    self.run_stage(name, ready, action)
+        else:
+            for name, ready, action in actions[1:]:
+                self.run_stage(name, ready, action)
 
         release = self._argocd_release() or {}
         report = {
@@ -993,11 +1033,13 @@ def validate_recovered_application(config: LabConfig) -> bool:
 
 def main() -> None:
     config = LabConfig.from_environment()
+    bootstrap = RecoveryBootstrap(config)
     manager = PlatformRecovery(
         config,
         CheckpointStore(
             config.evidence_dir / "python-platform-recovery-checkpoint.json"
         ),
+        bootstrap=bootstrap,
     )
     report = manager.recover()
     print("PASS: Platform recovery completed")

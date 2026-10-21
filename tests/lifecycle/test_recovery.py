@@ -14,6 +14,7 @@ from foundation import (
     LabConfig,
     LifecycleError,
 )
+from bootstrap import BootstrapIdentity
 from recovery import RecoveryManager, STAGES
 
 
@@ -109,6 +110,34 @@ def test_preflight_does_not_execute(tmp_path):
     m.restore_platform.assert_not_called()
     m.restore_database.assert_not_called()
     assert all(call.kwargs == {"deep": False} for call in m.validate.call_args_list)
+
+
+def test_resume_binds_verified_bootstrap_identity(tmp_path):
+    m = manager(tmp_path)
+    m.account_guard = Mock()
+    m.validate = Mock(return_value=False)
+    m.bootstrap = Mock()
+    m.bootstrap.prepare.return_value = BootstrapIdentity(
+        account_id=m.config.expected_account_id,
+        region=m.config.aws_region,
+        cluster_arn=(
+            f"arn:aws:eks:{m.config.aws_region}:{m.config.expected_account_id}:"
+            f"cluster/{m.config.cluster_name}"
+        ),
+        terraform_workspace="default",
+        terraform_lineage="lineage-1",
+        terraform_serial=7,
+        source_revision="a" * 40,
+        evidence_root=str(tmp_path.resolve()),
+        kubeconfig=str(tmp_path / "kubeconfig"),
+        argocd_cli="/approved/argocd",
+        backend_fingerprint="b" * 64,
+    )
+    m.resume(execute=False)
+    m.bootstrap.prepare.assert_called_once_with(auto_repair=False)
+    values = m.checkpoint.load()["identity"]["values"]
+    assert values["terraform_serial"] == 7
+    assert values["source_revision"] == "a" * 40
 
 
 def test_unapproved_infrastructure_apply_blocked(tmp_path):

@@ -393,6 +393,7 @@ def python_shutdown_execute():
 
 # STAGE3_PYTHON_RECOVERY_PHASE3
 def python_resume(execute=False):
+    from bootstrap import RecoveryBootstrap
     from foundation import LabConfig, CommandRunner, CheckpointStore
     from recovery import RecoveryManager
 
@@ -404,6 +405,7 @@ def python_resume(execute=False):
         checkpoint=CheckpointStore(
             config.evidence_dir / "python-resume-checkpoint.json"
         ),
+        bootstrap=RecoveryBootstrap(config),
     )
 
     report = manager.resume(execute=execute)
