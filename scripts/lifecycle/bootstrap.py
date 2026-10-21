@@ -408,30 +408,49 @@ class RecoveryBootstrap:
             args = command.get("args", [])
             if not isinstance(args, list):
                 return False
-
-            if args[:2] != ["eks", "get-token"]:
-                return False
-
             if not all(isinstance(arg, str) for arg in args):
                 return False
 
-            def option_value(option):
-                positions = [
-                    i for i, arg in enumerate(args)
-                    if arg == option
-                ]
-                if len(positions) != 1:
-                    return None
-                i = positions[0]
-                if i + 1 >= len(args):
-                    return None
-                value = args[i + 1]
-                if not value or value.startswith("-"):
-                    return None
-                return value
+            # Parse the approved AWS CLI global options and EKS command.
+            # AWS-generated kubeconfigs may place --region before eks get-token.
+            options = {}
+            tokens = []
+            allowed_options = {
+                "--region", "--cluster-name",
+                "--cluster-id", "--output",
+            }
 
-            cluster_name = option_value("--cluster-name")
-            cluster_id = option_value("--cluster-id")
+            i = 0
+            while i < len(args):
+                item = args[i]
+
+                if item in allowed_options:
+                    if item in options or i + 1 >= len(args):
+                        return False
+                    value = args[i + 1]
+                    if not value or value.startswith("-"):
+                        return False
+                    options[item] = value
+                    i += 2
+                    continue
+
+                if item.startswith("-"):
+                    return False
+
+                tokens.append(item)
+                i += 1
+
+            if tokens != ["eks", "get-token"]:
+                return False
+
+            if options.get("--region") != self.config.aws_region:
+                return False
+
+            if options.get("--output") != "json":
+                return False
+
+            cluster_name = options.get("--cluster-name")
+            cluster_id = options.get("--cluster-id")
 
             if (cluster_name is None) == (cluster_id is None):
                 return False
@@ -439,32 +458,21 @@ class RecoveryBootstrap:
             if cluster_name is not None:
                 if cluster_name != self.config.cluster_name:
                     return False
-            else:
-                if cluster_id != cluster.get("arn"):
+            elif cluster_id != cluster.get("arn"):
+                return False
+
+            exec_env = command.get("env", [])
+            if not isinstance(exec_env, list):
+                return False
+            for item in exec_env:
+                if not isinstance(item, dict):
                     return False
-
-            if option_value("--region") != self.config.aws_region:
-                return False
-
-            if any(
-                arg in args for arg in (
-                    "--profile", "--role-arn", "--output",
-                    "--endpoint-url", "--no-verify-ssl",
-                )
-            ):
-                return False
-
-            allowed = {
-                "--cluster-name", "--cluster-id", "--region",
-            }
-            i = 2
-            while i < len(args):
-                if args[i] not in allowed or i + 1 >= len(args):
+                if set(item) != {"name", "value"}:
                     return False
-                i += 2
-
-            if command.get("env"):
-                return False
+                if item["name"] != "AWS_PROFILE":
+                    return False
+                if not isinstance(item["value"], str) or not item["value"]:
+                    return False
 
             expected_ca = base64.b64decode(
                 cluster["certificateAuthority"]["data"],

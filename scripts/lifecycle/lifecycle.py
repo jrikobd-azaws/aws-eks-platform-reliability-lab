@@ -854,7 +854,7 @@ def validate_backup_manifest(config, manifest_path=None):
         or data.get("database") != database
         or data.get("rds_endpoint") != host
         or data.get("rds_master_secret_arn") != values.get("rds_master_secret_arn")
-        or data.get("source_revision") != source_revision
+        or not re.fullmatch(r"[0-9a-f]{40}", str(data.get("source_revision", "")))
     ):
         raise LifecycleError("Backup identity does not match the current environment and source")
     backup = validate_path_boundary(
@@ -877,7 +877,8 @@ def validate_backup_manifest(config, manifest_path=None):
         "manifest_data": data,
         "backup": backup,
         "database_sha256": data["database_sha256"],
-        "source_revision": source_revision,
+        "source_revision": data["source_revision"],
+        "recovery_controller_revision": source_revision,
         "archive": archive,
         "values": values,
         "host": host,
@@ -1341,6 +1342,33 @@ def _certification_datetime(value, description):
     return created
 
 
+def verify_backup_restore_provenance(config, backup, restore):
+    """Bind historical backup provenance to a successful isolated restore test.
+
+    The current recovery-controller revision is intentionally independent of
+    the immutable source revision recorded when the archive was created.
+    """
+    manifest = backup["manifest_data"]
+    required = (
+        restore.get("status") == "passed"
+        and restore.get("restore_tested_to_database") is True
+        and restore.get("schema_verified") is True
+        and restore.get("runtime_permissions_verified") is True
+        and restore.get("database_cleanup_verified") is True
+        and restore.get("temporary_resources_cleanup_verified") is True
+        and restore.get("source_identity_verified") is True
+        and restore.get("source_revision") == manifest.get("source_revision")
+        and restore.get("database_sha256") == backup["database_sha256"]
+        and restore.get("account") == config.expected_account_id
+        and restore.get("cluster") == config.cluster_name
+        and restore.get("database") == backup["database"]
+    )
+    if not required:
+        raise LifecycleError("Backup and isolated restore-test provenance mismatch")
+    _verify_backup_restore_order(manifest, restore)
+    return True
+
+
 def _verify_backup_restore_order(backup, restore):
     backup_created = _certification_datetime(
         backup.get("created_utc"), "Backup"
@@ -1392,24 +1420,7 @@ def certify_shutdown(config, *, plan_report, tfvars, confirmation):
     backup = validate_backup_manifest(config)
     restore_path = discover_latest_restore_test(config)
     restore = json.loads(restore_path.read_text())
-    _verify_backup_restore_order(
-        backup["manifest_data"], restore
-    )
-    required_restore = (
-        restore.get("status") == "passed"
-        and restore.get("restore_tested_to_database") is True
-        and restore.get("schema_verified") is True
-        and restore.get("runtime_permissions_verified") is True
-        and restore.get("database_cleanup_verified") is True
-        and restore.get("temporary_resources_cleanup_verified") is True
-        and restore.get("source_identity_verified") is True
-        and restore.get("database_sha256") == backup["database_sha256"]
-        and restore.get("source_revision") == source_revision
-        and restore.get("account") == config.expected_account_id
-        and restore.get("cluster") == config.cluster_name
-    )
-    if not required_restore:
-        raise LifecycleError("Restore-test evidence is incomplete or belongs to another source")
+    verify_backup_restore_provenance(config, backup, restore)
     live = verify_shutdown_live_gates(config)
     readiness = {
         "schema": 1,

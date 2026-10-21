@@ -174,7 +174,8 @@ def plan_fixture(tmp_path, backup):
     atomic_json_write(restore, {
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "status": "passed", "account": plan["account"],
-        "cluster": plan["cluster"], "database_sha256": backup["database_sha256"],
+        "cluster": plan["cluster"], "database": "app",
+        "database_sha256": backup["database_sha256"],
         "source_revision": "a" * 40, "source_identity_verified": True,
         "restore_tested_to_database": True, "schema_verified": True,
         "runtime_permissions_verified": True,

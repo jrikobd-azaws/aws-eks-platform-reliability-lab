@@ -356,7 +356,9 @@ def test_native_kubeconfig_accepts_verified_eks_identity(tmp_path):
                     "eks", "get-token",
                     "--region", "eu-west-1",
                     "--cluster-name", "eks-platform-reliability-lab",
+                    "--output", "json",
                 ],
+                "env": [{"name": "AWS_PROFILE", "value": "eks-lab-terraform"}],
             }
         }}],
     }))

@@ -365,6 +365,15 @@ def restore_database(config, manifest_path):
     values,host,db=database_connection(config)
     if manifest['account']!=config.expected_account_id or manifest['cluster']!=config.cluster_name or manifest['database']!=db:
         raise LifecycleError('Backup belongs to another environment')
+    # Validate immutable archive and its independent restore-test provenance.
+    # Do not equate the recovery controller revision with backup provenance.
+    from lifecycle import (
+        validate_backup_manifest, discover_latest_restore_test,
+        verify_backup_restore_provenance,
+    )
+    backup = validate_backup_manifest(config, manifest_file)
+    restore_test = json.loads(discover_latest_restore_test(config).read_text())
+    verify_backup_restore_provenance(config, backup, restore_test)
     check_db_fresh(config,values,manifest)
     key=age_identity()
     raw_encrypted = Path(manifest.get('database_backup', ''))
