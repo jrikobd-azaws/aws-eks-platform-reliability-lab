@@ -853,10 +853,50 @@ def validate_backup_manifest(config, manifest_path=None):
         or data.get("cluster") != config.cluster_name
         or data.get("database") != database
         or data.get("rds_endpoint") != host
-        or data.get("rds_master_secret_arn") != values.get("rds_master_secret_arn")
         or not re.fullmatch(r"[0-9a-f]{40}", str(data.get("source_revision", "")))
     ):
         raise LifecycleError("Backup identity does not match the current environment and source")
+    # Historical secret identity is immutable backup provenance. The current
+    # destination must instead be bound to the live recreated RDS instance.
+    historical_secret = data.get("rds_master_secret_arn")
+    current_secret = values.get("rds_master_secret_arn")
+    if not isinstance(historical_secret, str) or not historical_secret:
+        raise LifecycleError("Historical backup master-secret identity missing")
+    if not isinstance(current_secret, str) or not current_secret:
+        raise LifecycleError("Current RDS master-secret identity missing")
+    rds = json.loads(output([
+        "aws", "rds", "describe-db-instances", "--db-instance-identifier",
+        config.cluster_name + "-postgres", "--output", "json",
+    ], env=environment(config)))
+    instances = rds.get("DBInstances", [])
+    if len(instances) != 1:
+        raise LifecycleError("Current RDS instance identity ambiguous")
+    instance = instances[0]
+    if (instance.get("DBInstanceStatus") != "available"
+            or instance.get("Endpoint", {}).get("Address") != host
+            or instance.get("MasterUserSecret", {}).get("SecretArn") != current_secret):
+        raise LifecycleError("Current RDS master-secret ownership mismatch")
+    # A replaced secret is accepted only with a matching successful historical
+    # restore test; do not silently reinterpret an old backup as a new one.
+    if historical_secret != current_secret:
+        restore_path = discover_latest_restore_test(config)
+        restore = json.loads(restore_path.read_text())
+        if not (
+            restore.get("status") == "passed"
+            and restore.get("source_identity_verified") is True
+            and restore.get("restore_tested_to_database") is True
+            and restore.get("schema_verified") is True
+            and restore.get("runtime_permissions_verified") is True
+            and restore.get("database_cleanup_verified") is True
+            and restore.get("temporary_resources_cleanup_verified") is True
+            and restore.get("source_revision") == data["source_revision"]
+            and restore.get("database_sha256") == data.get("database_sha256")
+            and restore.get("account") == config.expected_account_id
+            and restore.get("cluster") == config.cluster_name
+            and restore.get("database") == database
+        ):
+            raise LifecycleError("Historical backup restore-test provenance mismatch")
+        _verify_backup_restore_order(data, restore)
     backup = validate_path_boundary(
         Path(data.get("database_backup", "")), description="Encrypted database backup"
     )
