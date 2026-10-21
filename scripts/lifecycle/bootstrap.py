@@ -344,26 +344,148 @@ class RecoveryBootstrap:
         return path
 
     def _kubeconfig_matches(self, path: Path, cluster: dict) -> bool:
+        """Compare the selected isolated context with verified EKS identity."""
         if not path.is_file() or path.is_symlink():
             return False
         if stat.S_IMODE(path.stat().st_mode) & 0o077:
             return False
-        env = self.config.environment()
-        env["KUBECONFIG"] = str(path)
+
         try:
-            current = self._capture(["kubectl", "config", "current-context"], env=env)
-            view = self._json(["kubectl", "config", "view", "--minify", "-o", "json"], env=env)
-        except LifecycleError:
+            with path.open("r", encoding="utf-8") as stream:
+                config = yaml.safe_load(stream)
+
+            if not isinstance(config, dict):
+                return False
+
+            current = config.get("current-context")
+            contexts = [
+                item["context"]
+                for item in config.get("contexts", [])
+                if isinstance(item, dict)
+                and item.get("name") == current
+            ]
+
+            if not current or len(contexts) != 1:
+                return False
+
+            selected = contexts[0]
+            cluster_name = selected.get("cluster")
+
+            clusters = [
+                item["cluster"]
+                for item in config.get("clusters", [])
+                if isinstance(item, dict)
+                and item.get("name") == cluster_name
+            ]
+
+            if len(clusters) != 1:
+                return False
+
+            live = clusters[0]
+
+            user_name = selected.get("user")
+            users = [
+                item["user"]
+                for item in config.get("users", [])
+                if isinstance(item, dict)
+                and item.get("name") == user_name
+            ]
+
+            if not user_name or len(users) != 1:
+                return False
+
+            authentication = users[0]
+            if not isinstance(authentication, dict):
+                return False
+
+            command = authentication.get("exec", {})
+            if not isinstance(command, dict):
+                return False
+
+            if command.get("command") != "aws":
+                return False
+
+            args = command.get("args", [])
+            if not isinstance(args, list):
+                return False
+
+            if args[:2] != ["eks", "get-token"]:
+                return False
+
+            if not all(isinstance(arg, str) for arg in args):
+                return False
+
+            def option_value(option):
+                positions = [
+                    i for i, arg in enumerate(args)
+                    if arg == option
+                ]
+                if len(positions) != 1:
+                    return None
+                i = positions[0]
+                if i + 1 >= len(args):
+                    return None
+                value = args[i + 1]
+                if not value or value.startswith("-"):
+                    return None
+                return value
+
+            cluster_name = option_value("--cluster-name")
+            cluster_id = option_value("--cluster-id")
+
+            if (cluster_name is None) == (cluster_id is None):
+                return False
+
+            if cluster_name is not None:
+                if cluster_name != self.config.cluster_name:
+                    return False
+            else:
+                if cluster_id != cluster.get("arn"):
+                    return False
+
+            if option_value("--region") != self.config.aws_region:
+                return False
+
+            if any(
+                arg in args for arg in (
+                    "--profile", "--role-arn", "--output",
+                    "--endpoint-url", "--no-verify-ssl",
+                )
+            ):
+                return False
+
+            allowed = {
+                "--cluster-name", "--cluster-id", "--region",
+            }
+            i = 2
+            while i < len(args):
+                if args[i] not in allowed or i + 1 >= len(args):
+                    return False
+                i += 2
+
+            if command.get("env"):
+                return False
+
+            expected_ca = base64.b64decode(
+                cluster["certificateAuthority"]["data"],
+                validate=True,
+            )
+            actual_ca = base64.b64decode(
+                live["certificate-authority-data"],
+                validate=True,
+            )
+
+            return (
+                bool(selected.get("user"))
+                and live.get("server") == cluster.get("endpoint")
+                and actual_ca == expected_ca
+            )
+
+        except (
+            OSError, KeyError, TypeError, ValueError,
+            yaml.YAMLError,
+        ):
             return False
-        clusters = view.get("clusters", [])
-        if not current or len(clusters) != 1:
-            return False
-        live = clusters[0].get("cluster", {})
-        return (
-            live.get("server") == cluster.get("endpoint")
-            and live.get("certificate-authority-data")
-            == cluster.get("certificateAuthority", {}).get("data")
-        )
 
     def _ensure_kubeconfig(self, cluster: dict, *, auto_repair: bool) -> Path:
         self._tool("kubectl")

@@ -315,3 +315,200 @@ def test_argocd_service_port_is_discovered(tmp_path, monkeypatch):
         pass
     assert "8443:9443" in popen.call_args.args[0]
     process.terminate.assert_called_once()
+
+
+def test_native_kubeconfig_accepts_verified_eks_identity(tmp_path):
+    import base64
+    import yaml
+
+    ca = b"synthetic-test-ca-certificate"
+    encoded = base64.b64encode(ca).decode()
+
+    cluster = {
+        "endpoint": "https://approved.eks.example",
+        "certificateAuthority": {"data": encoded},
+    }
+
+    path = tmp_path / "kubeconfig"
+    path.write_text(yaml.safe_dump({
+        "apiVersion": "v1",
+        "kind": "Config",
+        "current-context": "eks-reliability-lab",
+        "contexts": [{
+            "name": "eks-reliability-lab",
+            "context": {
+                "cluster": "approved-cluster",
+                "user": "approved-user",
+            },
+        }],
+        "clusters": [{
+            "name": "approved-cluster",
+            "cluster": {
+                "server": cluster["endpoint"],
+                "certificate-authority-data": encoded,
+            },
+        }],
+        "users": [{"name": "approved-user", "user": {
+            "exec": {
+                "apiVersion": "client.authentication.k8s.io/v1beta1",
+                "command": "aws",
+                "args": [
+                    "eks", "get-token",
+                    "--region", "eu-west-1",
+                    "--cluster-name", "eks-platform-reliability-lab",
+                ],
+            }
+        }}],
+    }))
+    path.chmod(0o600)
+
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    assert boot._kubeconfig_matches(path, cluster)
+
+    wrong_endpoint = dict(cluster, endpoint="https://wrong.example")
+    assert not boot._kubeconfig_matches(path, wrong_endpoint)
+
+    wrong_ca = dict(
+        cluster,
+        certificateAuthority={
+            "data": base64.b64encode(b"different-ca").decode()
+        },
+    )
+    assert not boot._kubeconfig_matches(path, wrong_ca)
+
+    path.chmod(0o644)
+    assert not boot._kubeconfig_matches(path, cluster)
+
+
+def test_native_kubeconfig_rejects_ambiguous_context(tmp_path):
+    import base64
+    import yaml
+
+    encoded = base64.b64encode(b"synthetic-ca").decode()
+    cluster = {
+        "endpoint": "https://approved.eks.example",
+        "certificateAuthority": {"data": encoded},
+    }
+
+    path = tmp_path / "kubeconfig"
+    path.write_text(yaml.safe_dump({
+        "current-context": "approved",
+        "contexts": [
+            {"name": "approved", "context": {
+                "cluster": "one", "user": "operator"}},
+            {"name": "approved", "context": {
+                "cluster": "two", "user": "operator"}},
+        ],
+        "clusters": [{
+            "name": "one",
+            "cluster": {
+                "server": cluster["endpoint"],
+                "certificate-authority-data": encoded,
+            },
+        }],
+    }))
+    path.chmod(0o600)
+
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    assert not boot._kubeconfig_matches(path, cluster)
+
+
+def test_native_kubeconfig_rejects_wrong_eks_auth_cluster(tmp_path):
+    import base64
+    import yaml
+
+    ca = base64.b64encode(b"synthetic-ca").decode()
+
+    path = tmp_path / "kubeconfig"
+    path.write_text(yaml.safe_dump({
+        "current-context": "approved",
+        "contexts": [{
+            "name": "approved",
+            "context": {"cluster": "approved", "user": "operator"},
+        }],
+        "clusters": [{
+            "name": "approved",
+            "cluster": {
+                "server": "https://approved.eks.example",
+                "certificate-authority-data": ca,
+            },
+        }],
+        "users": [{
+            "name": "operator",
+            "user": {
+                "exec": {
+                    "command": "aws",
+                    "args": [
+                        "eks", "get-token",
+                        "--cluster-name", "wrong-cluster",
+                    ],
+                },
+            },
+        }],
+    }))
+    path.chmod(0o600)
+
+    cluster = {
+        "endpoint": "https://approved.eks.example",
+        "certificateAuthority": {"data": ca},
+    }
+
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+
+    assert not boot._kubeconfig_matches(path, cluster)
+
+
+@pytest.mark.parametrize("bad_args", [
+    ["eks", "get-token", "--region", "us-east-1",
+     "--cluster-name", "eks-platform-reliability-lab"],
+    ["eks", "get-token", "--region", "eu-west-1",
+     "--cluster-name", "wrong-cluster"],
+    ["eks", "get-token", "--region", "eu-west-1",
+     "--cluster-name", "eks-platform-reliability-lab",
+     "--cluster-name", "eks-platform-reliability-lab"],
+    ["eks", "get-token", "--region", "eu-west-1",
+     "--cluster-name", "eks-platform-reliability-lab",
+     "--profile", "unapproved"],
+])
+def test_native_kubeconfig_rejects_unsafe_exec_args(tmp_path, bad_args):
+    import base64
+    import yaml
+
+    ca = base64.b64encode(b"synthetic-ca").decode()
+    path = tmp_path / "kubeconfig"
+
+    path.write_text(yaml.safe_dump({
+        "current-context": "approved",
+        "contexts": [{
+            "name": "approved",
+            "context": {
+                "cluster": "approved",
+                "user": "operator",
+            },
+        }],
+        "clusters": [{
+            "name": "approved",
+            "cluster": {
+                "server": "https://approved.eks.example",
+                "certificate-authority-data": ca,
+            },
+        }],
+        "users": [{
+            "name": "operator",
+            "user": {
+                "exec": {
+                    "command": "aws",
+                    "args": bad_args,
+                },
+            },
+        }],
+    }))
+    path.chmod(0o600)
+
+    cluster = {
+        "endpoint": "https://approved.eks.example",
+        "certificateAuthority": {"data": ca},
+    }
+
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    assert not boot._kubeconfig_matches(path, cluster)
