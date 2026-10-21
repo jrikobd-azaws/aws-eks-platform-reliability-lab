@@ -435,7 +435,13 @@ def python_deploy_preflight(config_path, check_aws=False):
 # CLI_A_NATIVE_ROUTING_V2
 def native_action(command,args):
     from foundation import LabConfig, LifecycleError
-    from lifecycle import backup, create_plan, execute_plan
+    from lifecycle import (
+        backup,
+        certify_shutdown,
+        create_plan,
+        execute_plan,
+        restore_test_backup,
+    )
     from recovery import restore_database, platform
     config=LabConfig.from_environment()
     if command=='native-backup': backup(config)
@@ -449,6 +455,17 @@ def native_action(command,args):
             raise LifecycleError('Explicit RESTORE-account confirmation and manifest required')
         restore_database(config,args.report)
     elif command=='native-platform-restore': platform(config)
+    elif command=='native-restore-test':
+        restore_test_backup(
+            config, confirmation=args.confirm, manifest_path=args.report
+        )
+    elif command=='native-shutdown-certify':
+        if not args.report or not args.tfvars:
+            raise LifecycleError('Shutdown plan --report and --tfvars are required')
+        certify_shutdown(
+            config, plan_report=args.report, tfvars=args.tfvars,
+            confirmation=args.confirm,
+        )
     else: raise LifecycleError('Unknown native operation')
 
 
@@ -520,6 +537,8 @@ def main():
             "native-rebuild-execute",
             "native-database-restore",
             "native-platform-restore",
+            "native-restore-test",
+            "native-shutdown-certify",
         ],
     )
 

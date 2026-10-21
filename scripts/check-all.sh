@@ -40,7 +40,7 @@ if find infra/terraform -type f -name '*.tf' -print -quit 2>/dev/null | grep -q 
 fi
 if [[ -f app/helm/Chart.yaml ]]; then
  command -v helm >/dev/null || exit 78
- helm lint app/helm
- helm template safety-check app/helm >/dev/null
+ helm lint app/helm --set-string backend.image=offline.invalid/backend:validation --set-string frontend.image=offline.invalid/frontend:validation
+ helm template safety-check app/helm --set-string backend.image=offline.invalid/backend:validation --set-string frontend.image=offline.invalid/frontend:validation >/dev/null
 fi
 printf '%s\n' 'Implemented local checks passed. No cloud-validation claim.'

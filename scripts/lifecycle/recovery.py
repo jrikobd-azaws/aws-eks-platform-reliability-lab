@@ -92,50 +92,18 @@ class RecoveryManager:
         return eks == "ACTIVE" and rds == "available"
 
     def platform_ready(self):
-        releases = json.loads(self.capture([
-            "helm", "list", "-A", "-o", "json",
-        ]))
+        """Validate the Argo-owned platform and recovery dependencies."""
+        from recover_platform import platform_recovery_state_ready
 
-        deployed = {
-            (release["name"], release["namespace"])
-            for release in releases
-            if release.get("status") == "deployed"
-        }
+        return platform_recovery_state_ready(self.config)
 
-        required = {
-            ("argocd", "argocd"),
-            ("external-secrets", "platform-system"),
-            ("aws-load-balancer-controller", "kube-system"),
-        }
+    def database_ready(self, *, deep=False):
+        """Use actual PostgreSQL state during execution and evidence in preflight."""
+        if deep:
+            from recover_platform import validate_recovered_database
 
-        if not required.issubset(deployed):
-            return False
+            return validate_recovered_database(self.config)
 
-        for name in ("rds-credentials", "fastapi-auth"):
-            secret = json.loads(self.capture([
-                "kubectl", "-n", "dev",
-                "get", "externalsecret", name,
-                "-o", "json",
-            ]))
-
-            ready = any(
-                c.get("type") == "Ready"
-                and c.get("status") == "True"
-                for c in secret.get("status", {}).get(
-                    "conditions", []
-                )
-            )
-
-            if not ready:
-                return False
-
-        return True
-
-    def database_ready(self):
-        """Validate previous live DB acceptance evidence and identity.
-
-        This is NOT equivalent to a new SQL connection test.
-        """
         report = (
             self.config.evidence_dir
             / "python-acceptance-20261016T024639Z"
@@ -152,29 +120,21 @@ class RecoveryManager:
             and data.get("platform_verification") == "passed"
         )
 
-    def verification_ready(self):
-        report = (
-            self.config.evidence_dir
-            / "frontend-routing-acceptance.json"
-        )
+    def verification_ready(self, *, deep=False):
+        if deep:
+            from recover_platform import validate_recovered_database, validate_recovered_application
+            if not validate_recovered_database(self.config):
+                return False
+            return validate_recovered_application(self.config)
+        # Historical reports are never sufficient for final certification.
+        return False
 
-        if not report.is_file():
-            return False
-
-        data = json.loads(report.read_text())
-
-        return (
-            data.get("status") == "passed"
-            and data.get("results", {}).get("api_proxy")
-            == "passed"
-        )
-
-    def validate(self, stage):
+    def validate(self, stage, *, deep=False):
         checks = {
             "infrastructure": self.infrastructure_ready,
             "platform": self.platform_ready,
-            "database": self.database_ready,
-            "verification": self.verification_ready,
+            "database": lambda: self.database_ready(deep=deep),
+            "verification": lambda: self.verification_ready(deep=deep),
         }
 
         return checks[stage]()
@@ -203,32 +163,65 @@ class RecoveryManager:
         ], timeout=3600)
 
     def restore_database(self):
-        """Run guarded legacy restore only against a fresh RDS.
+        """Guarded database restore using the existing native CLI.
 
-        Never retry blindly after a partial database restore.
+        Approval and recovery manifest must be explicitly supplied
+        by the operator; no approval is generated automatically.
         """
-        script = ROOT / "scripts/lifecycle/lab-resume.sh"
+        manifest = os.environ.get("LAB_RECOVERY_MANIFEST", "")
+        confirmation = os.environ.get("LAB_DATABASE_RESTORE_CONFIRM", "")
 
-        if not script.is_file():
-            raise LifecycleError("Database recovery script missing")
+        if not manifest or not confirmation:
+            raise LifecycleError(
+                "Explicit recovery manifest and database restore "
+                "confirmation are required"
+            )
 
-        env = self.config.environment()
-        env["LAB_DATABASE_RESTORE_APPROVED"] = "YES"
+        expected = "RESTORE-" + self.config.expected_account_id
+        if confirmation != expected:
+            raise LifecycleError(
+                "Database restore confirmation mismatch"
+            )
 
-        subprocess.run(
-            ["bash", str(script), "restore-database"],
-            cwd=ROOT,
-            env=env,
-            check=True,
-            timeout=1800,
-        )
+        manifest_path = Path(manifest)
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise LifecycleError(
+                "Recovery manifest missing or invalid"
+            )
 
-    def verify_environment(self):
-        script = ROOT / "scripts/lifecycle/labctl.py"
+        boundary = self.config.evidence_dir.resolve()
+        resolved = manifest_path.resolve()
+
+        if not resolved.is_relative_to(boundary):
+            raise LifecycleError(
+                "Recovery manifest outside approved evidence directory"
+            )
 
         self.command([
-            "python3", script, "verify",
-        ], timeout=1200)
+            "python3",
+            str(ROOT / "scripts/lifecycle/labctl.py"),
+            "--report", str(resolved),
+            "--confirm", confirmation,
+            "native-database-restore",
+        ], timeout=3600)
+
+    def verify_environment(self):
+        """After database SQL validation, restore Stage 3 and verify application health."""
+        from recover_platform import PlatformRecovery, validate_recovered_database, validate_recovered_application
+        if not validate_recovered_database(self.config):
+            raise LifecycleError("Database schema not ready for application recovery")
+        manager = PlatformRecovery(
+            self.config,
+            CheckpointStore(self.config.evidence_dir / "python-platform-recovery-checkpoint.json"),
+        )
+        manager.verify_identity(update_kubeconfig=False)
+        manager.run_stage(
+            "stage3_application",
+            manager.stage3_application_ready,
+            manager.restore_stage3_application,
+        )
+        if not validate_recovered_application(self.config):
+            raise LifecycleError("Stage 3 application readiness verification failed")
 
     def run_stage(
         self,
@@ -240,16 +233,9 @@ class RecoveryManager:
         if stage not in STAGES:
             raise LifecycleError("Unknown recovery stage")
 
-        # Revalidate the live state even when checkpoint says passed.
-        try:
-            already_ready = self.validate(stage)
-        except (
-            LifecycleError,
-            subprocess.CalledProcessError,
-            json.JSONDecodeError,
-            KeyError,
-        ):
-            already_ready = False
+        # Revalidate actual state even when a checkpoint says passed. Unknown
+        # state is an error, not permission to run a recovery action.
+        already_ready = self.validate(stage, deep=True)
 
         if already_ready:
             self.checkpoint.update(
@@ -268,7 +254,7 @@ class RecoveryManager:
         try:
             action()
 
-            if not self.validate(stage):
+            if not self.validate(stage, deep=True):
                 raise LifecycleError(
                     f"{stage} action completed but acceptance failed"
                 )
@@ -294,10 +280,7 @@ class RecoveryManager:
 
         for stage in STAGES:
             if not execute:
-                try:
-                    ready = self.validate(stage)
-                except Exception:
-                    ready = False
+                ready = self.validate(stage, deep=False)
 
                 results[stage] = (
                     "ready" if ready else "requires_recovery"
@@ -309,7 +292,7 @@ class RecoveryManager:
             index = STAGES.index(stage)
 
             for prerequisite in STAGES[:index]:
-                if not self.validate(prerequisite):
+                if not self.validate(prerequisite, deep=True):
                     raise LifecycleError(
                         f"Prerequisite not ready: {prerequisite}"
                     )
@@ -327,9 +310,9 @@ class RecoveryManager:
             "mode": "execute" if execute else "preflight",
             "stages": results,
             "note": (
-                "Database readiness uses historical acceptance evidence; "
-                "fresh SQL validation is required before treating a "
-                "newly recreated database as restored."
+                "Execute mode revalidates RDS identity, Alembic head, schema, "
+                "runtime-role protection and application health. Preflight "
+                "remains non-mutating and uses accepted evidence."
             ),
         }
 
