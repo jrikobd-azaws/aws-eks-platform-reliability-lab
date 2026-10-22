@@ -348,6 +348,223 @@ def check_db_fresh(config,values,manifest):
     if created<=checkpoint or raw['DBInstanceStatus']!='available' or raw['Endpoint']['Address']!=values['rds_address']:
         raise LifecycleError('Database is not a newly recreated available RDS instance')
 
+RDS_CA_CONTAINER_PATH = '/etc/ssl/rds/global-bundle.pem'
+
+
+def _verified_pg_env(password_variable):
+    """Fail closed unless the mounted CA and libpq TLS settings are usable."""
+    if password_variable not in ('MASTER_PASSWORD', 'APP_PASSWORD'):
+        raise LifecycleError('Unexpected PostgreSQL credential variable')
+    return (
+        'test -r "$PGSSLROOTCERT" && test -s "$PGSSLROOTCERT" || exit 78; '
+        'export PGPASSWORD="${' + password_variable + '}"; '
+        'export PGSSLMODE=verify-full; '
+    )
+
+
+RDS_CA_OFFICIAL_URL = 'https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem'
+
+
+def _rds_ca_bundle():
+    """Fetch RDS trust directly from Amazon over authenticated HTTPS.
+
+    Fail closed: redirect targets and unauthenticated local PEMs are refused.
+    """
+    import ssl
+    import urllib.request
+    try:
+        request = urllib.request.Request(RDS_CA_OFFICIAL_URL, headers={'User-Agent': 'lb2-rds-trust/1'})
+        with urllib.request.urlopen(request, timeout=20, context=ssl.create_default_context()) as response:
+            if response.geturl() != RDS_CA_OFFICIAL_URL or response.status != 200:
+                raise LifecycleError('RDS CA trust source did not match official AWS URL')
+            content = response.read(1048577)
+        if len(content) > 1048576 or content.count(b'-----BEGIN CERTIFICATE-----') < 3:
+            raise LifecycleError('RDS CA trust bundle size or certificate count invalid')
+        import tempfile
+        with tempfile.NamedTemporaryFile() as tmp:
+            tmp.write(content)
+            tmp.flush()
+            ssl.create_default_context(cafile=tmp.name)
+        return content
+    except (OSError, ssl.SSLError, ValueError) as exc:
+        raise LifecycleError('Official AWS RDS CA retrieval or validation failed') from exc
+
+
+EXPECTED_ALEMBIC_REVISION = 'fe56fa70289e'
+EMPTY_TARGET_QUERY = (
+    "SELECT COUNT(*) FROM pg_class c JOIN pg_namespace n "
+    "ON n.oid=c.relnamespace WHERE n.nspname NOT IN "
+    "('pg_catalog','information_schema') "
+    "AND n.nspname NOT LIKE 'pg_toast%' "
+    "AND n.nspname NOT LIKE 'pg_temp_%' "
+    "AND c.relkind IN ('r','p','v','m','S','f');"
+)
+
+
+def _restore_failure_categories(
+    failure, *, restore_attempted, archive_restore_completed, cleanup_verified
+):
+    restore_category = None
+    if failure is not None:
+        if not restore_attempted:
+            restore_category = 'PRE_RESTORE_FAILURE'
+        elif not archive_restore_completed:
+            restore_category = 'PARTIAL_RESTORE_OR_UNKNOWN'
+        else:
+            restore_category = 'POST_RESTORE_VALIDATION_FAILED'
+    cleanup_category = (
+        None if cleanup_verified else 'TEMPORARY_RESOURCE_CLEANUP_INCOMPLETE'
+    )
+    return restore_category, cleanup_category
+
+
+def _database_acceptance_query():
+    """Return the post-restore schema and runtime-role acceptance query."""
+    dml = [
+        "has_table_privilege(current_user, 'public.\"%s\"', '%s')"
+        % (table, privilege)
+        for table in ('user', 'item')
+        for privilege in ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
+    ]
+    primary_key = lambda table: (
+        "EXISTS (SELECT 1 FROM information_schema.table_constraints tc "
+        "JOIN information_schema.key_column_usage kcu "
+        "ON kcu.constraint_schema=tc.constraint_schema "
+        "AND kcu.constraint_name=tc.constraint_name "
+        "WHERE tc.table_schema='public' AND tc.table_name='" + table + "' "
+        "AND tc.constraint_type='PRIMARY KEY' AND kcu.column_name='id')"
+    )
+    owner_fk = 'EXISTS (SELECT 1 FROM pg_catalog.pg_constraint fk JOIN pg_catalog.pg_attribute src ON src.attrelid=fk.conrelid AND src.attnum=fk.conkey[1] JOIN pg_catalog.pg_attribute dst ON dst.attrelid=fk.confrelid AND dst.attnum=fk.confkey[1] WHERE fk.contype=\'f\' AND fk.conrelid=\'public.item\'::regclass AND fk.confrelid=\'public."user"\'::regclass AND cardinality(fk.conkey)=1 AND cardinality(fk.confkey)=1 AND src.attname=\'owner_id\' AND dst.attname=\'id\' AND fk.convalidated)'
+    return (
+        "SELECT current_user='app_runtime',"
+        "(SELECT version_num='" + EXPECTED_ALEMBIC_REVISION + "' FROM alembic_version),"
+        "to_regclass('public.user') IS NOT NULL,"
+        "to_regclass('public.item') IS NOT NULL,"
+        "(SELECT data_type='uuid' FROM information_schema.columns "
+        "WHERE table_schema='public' AND table_name='user' AND column_name='id'),"
+        "(SELECT data_type='uuid' FROM information_schema.columns "
+        "WHERE table_schema='public' AND table_name='item' AND column_name='id'),"
+        + primary_key('user') + "," + primary_key('item') + "," + owner_fk + ","
+        "has_schema_privilege(current_user,'public','USAGE'),"
+        "has_schema_privilege(current_user,'public','CREATE'),"
+        "has_database_privilege(current_user,current_database(),'CREATE'),"
+        "(SELECT pg_get_userbyid(datdba)<>current_user FROM pg_database "
+        "WHERE datname=current_database()),"
+        + ",".join(dml) + ";"
+    )
+
+
+def _validate_restored_database(exec_pg):
+    query = _database_acceptance_query()
+    script = (
+        _verified_pg_env('APP_PASSWORD') +
+        'exec psql -X -At -v ON_ERROR_STOP=1 -h "$1" '
+        '-U app_runtime -d "$3" -c ' + __import__('shlex').quote(query)
+    )
+    expected = '|'.join(('t',) * 10 + ('f',) * 2 + ('t',) * 9)
+    if exec_pg(script).decode().strip() != expected:
+        raise LifecycleError(
+            'Restored Alembic, schema, ownership or runtime permission validation failed'
+        )
+
+
+def _cleanup_restore_resources(config, pod_name, secret_name):
+    """Delete only this restore's unique resources and prove their absence."""
+    clean = True
+    for kind, name in (('pod', pod_name), ('secret', secret_name)):
+        try:
+            call([
+                'kubectl', '-n', 'dev', 'delete', kind, name,
+                '--ignore-not-found=true', '--wait=true', '--timeout=120s',
+            ], env=environment(config), timeout=150)
+        except LifecycleError:
+            clean = False
+        try:
+            remaining = output([
+                'kubectl', '-n', 'dev', 'get', kind, name,
+                '--ignore-not-found', '-o', 'name',
+            ], env=environment(config))
+            if remaining:
+                clean = False
+        except LifecycleError:
+            clean = False
+    return clean
+
+
+def preflight_database_restore(config, manifest_path=None):
+    """Validate recovery inputs without opening a database network path.
+
+    The approved private transport is created by ``restore_database`` only
+    after account-bound authorization. Target emptiness remains mandatory and
+    is checked through that transport immediately before ``pg_restore``.
+    """
+    account_guard(config)
+    from lifecycle import (
+        discover_latest_restore_test,
+        validate_backup_manifest,
+        verify_backup_restore_provenance,
+    )
+
+    backup = validate_backup_manifest(config, manifest_path, historical_dev=True)
+    restore_test_path = discover_latest_restore_test(config)
+    restore_test = json.loads(restore_test_path.read_text(encoding='utf-8'))
+    verify_backup_restore_provenance(config, backup, restore_test, historical_dev=True)
+    check_db_fresh(config, backup['values'], backup['manifest_data'])
+    if backup['database'] != 'app':
+        raise LifecycleError('Unexpected recovery database identity')
+
+    validation_time = dt.datetime.now(dt.timezone.utc)
+    backup_time = dt.datetime.fromisoformat(
+        backup['manifest_data']['created_utc'].replace('Z', '+00:00')
+    ).astimezone(dt.timezone.utc)
+    backup_age_seconds = (validation_time - backup_time).total_seconds()
+    report_dir = config.evidence_dir / (
+        'native-database-preflight-'
+        + dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ-')
+        + secrets.token_hex(4)
+    )
+    report_dir.mkdir(mode=0o700)
+    report_path = report_dir / 'preflight.json'
+    atomic_json_write(report_path, {
+        'schema': 1,
+        'created_utc': utc_now(),
+        'validation_time_utc': validation_time.isoformat(),
+        'original_backup_time_utc': backup_time.isoformat(),
+        'backup_age_seconds': backup_age_seconds,
+        'historical_dev_age_exception': 'DEV_ONLY_EXPLICIT_RECOVERY_PATH',
+        'status': 'passed_pending_authorized_target_check',
+        'account': config.expected_account_id,
+        'region': config.aws_region,
+        'cluster': config.cluster_name,
+        'database': backup['database'],
+        'rds_endpoint': backup['host'],
+        'backup_manifest': str(backup['manifest']),
+        'backup_sha256': backup['database_sha256'],
+        'backup_source_revision': backup['source_revision'],
+        'recovery_controller_revision': backup['recovery_controller_revision'],
+        'restore_test_report': str(restore_test_path),
+        'backup_identity_verified': True,
+        'archive_integrity_verified': True,
+        'restore_test_provenance_verified': True,
+        'recreated_rds_identity_verified': True,
+        'target_emptiness_verified': False,
+        'target_emptiness_gate': (
+            'mandatory in authorized native restore before pg_restore'
+        ),
+        'private_network_transport': (
+            'authorized native temporary PostgreSQL client only'
+        ),
+        'restore_authorization_required': (
+            'RESTORE-' + config.expected_account_id
+        ),
+    })
+    print('PASS: Database recovery inputs verified read-only')
+    print('PENDING: Target emptiness requires authorized native restore transport')
+    print('MANIFEST:', backup['manifest'])
+    print('REPORT:', report_path)
+    return report_path
+
+
 def restore_database(config, manifest_path):
     account_guard(config)
     if not manifest_path:
@@ -365,6 +582,15 @@ def restore_database(config, manifest_path):
     values,host,db=database_connection(config)
     if manifest['account']!=config.expected_account_id or manifest['cluster']!=config.cluster_name or manifest['database']!=db:
         raise LifecycleError('Backup belongs to another environment')
+    # Validate immutable archive and its independent restore-test provenance.
+    # Do not equate the recovery controller revision with backup provenance.
+    from lifecycle import (
+        validate_backup_manifest, discover_latest_restore_test,
+        verify_backup_restore_provenance, sha256_approved_file,
+    )
+    backup = validate_backup_manifest(config, manifest_file, historical_dev=True)
+    restore_test = json.loads(discover_latest_restore_test(config).read_text())
+    verify_backup_restore_provenance(config, backup, restore_test, historical_dev=True)
     check_db_fresh(config,values,manifest)
     key=age_identity()
     raw_encrypted = Path(manifest.get('database_backup', ''))
@@ -379,10 +605,11 @@ def restore_database(config, manifest_path):
     )
     if not any(encrypted.is_relative_to(root) for root in allowed_backup_roots):
         raise LifecycleError('Encrypted database backup outside authorized storage boundaries')
-    if sha256_file(encrypted)!=manifest['database_sha256']:
+    if sha256_approved_file(encrypted)!=manifest['database_sha256']:
         raise LifecycleError('Encrypted backup checksum mismatch')
     archive=call(['age','-d','-i',str(key),str(encrypted)])
     call(['pg_restore','--list'],data=archive)
+    ca_bundle = _rds_ca_bundle()
     master=master_credentials(config,values)
     # Retrieve existing application credentials without printing values.
     app=json.loads(call(['aws','secretsmanager','get-secret-value','--secret-id',config.cluster_name+'/dev/app-runtime',
@@ -393,55 +620,136 @@ def restore_database(config, manifest_path):
         # Credentials are supplied as environment variables from a short-lived
         # Kubernetes Secret; binary pg_restore stdin contains only the archive.
         suffix=secrets.token_hex(5)
+        ca_name='native-pg-rds-ca-'+suffix
         secret_name='native-pg-credentials-'+suffix
         pod_name='native-pg-restore-'+suffix
         secret={'apiVersion':'v1','kind':'Secret','metadata':{'name':secret_name,'namespace':'dev'},'type':'Opaque',
             'stringData':{'MASTER_PASSWORD':master['password'],'APP_PASSWORD':app['password']}}
-        created_secret=False; created_pod=False
+        checkpoint = CheckpointStore(
+            config.evidence_dir / 'python-resume-checkpoint.json'
+        )
+        report_dir = config.evidence_dir / (
+            'native-database-restore-'
+            + dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ-')
+            + secrets.token_hex(4)
+        )
+        report_dir.mkdir(mode=0o700)
+        report_path = report_dir / 'restore.json'
+        report = {
+            'schema': 1,
+            'created_utc': utc_now(),
+            'account': config.expected_account_id,
+            'region': config.aws_region,
+            'cluster': config.cluster_name,
+            'database': db,
+            'rds_endpoint': host,
+            'backup_sha256': manifest['database_sha256'],
+            'backup_source_revision': manifest.get('source_revision'),
+            'alembic_revision': None,
+            'restore_attempted': False,
+            'archive_restore_completed': False,
+            'restore_succeeded': False,
+            'schema_and_permissions_verified': False,
+            'temporary_resources_cleanup_verified': False,
+            'status': 'running',
+            'failure_type': None,
+            'restore_failure_category': None,
+            'cleanup_failure_category': None,
+        }
+        checkpoint.update('database', 'running', detail='Native database restore authorized')
+        atomic_json_write(report_path, report)
+        failure = None
+        ca_creation_attempted = False
         try:
+            ca_spec = {'apiVersion':'v1','kind':'ConfigMap', 'metadata':{'name':ca_name,'namespace':'dev'},
+                       'data':{'global-bundle.pem':ca_bundle.decode('ascii')}}
+            ca_creation_attempted = True
+            call(['kubectl','-n','dev','create','-f','-'],data=json.dumps(ca_spec).encode(),env=environment(config))
             call(['kubectl','-n','dev','create','-f','-'],data=json.dumps(secret).encode(),env=environment(config))
-            created_secret=True
             spec=client_pod(config,pod_name)
-            spec['spec']['containers'][0]['env']=[
+            spec['spec'].setdefault('volumes', []).append({'name':'rds-ca','configMap':{'name':ca_name,'defaultMode':292}})
+            spec['spec']['containers'][0].setdefault('volumeMounts', []).append({'name':'rds-ca','mountPath':'/etc/ssl/rds','readOnly':True})
+            spec['spec']['containers'][0].setdefault('env', []).extend([{'name':'PGSSLROOTCERT','value':RDS_CA_CONTAINER_PATH}] + [
                 {'name':k,'valueFrom':{'secretKeyRef':{'name':secret_name,'key':k}}}
-                for k in ('MASTER_PASSWORD','APP_PASSWORD')]
+                for k in ('MASTER_PASSWORD','APP_PASSWORD')])
             call(['kubectl','-n','dev','create','-f','-'],data=json.dumps(spec).encode(),env=environment(config))
-            created_pod=True
             call(['kubectl','-n','dev','wait','--for=condition=Ready','pod/'+pod_name,'--timeout=180s'],env=environment(config),timeout=220)
             def exec_pg(script, data=None, timeout=180):
                 return call(['kubectl','-n','dev','exec','-i',pod_name,'--','sh','-c',script,'restore',host,master['username'],db],
                     data=data,env=environment(config),timeout=timeout)
             # No database mutation until empty-target check succeeds.
-            query="SELECT COUNT(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp_%' AND c.relkind IN ('r','p','v','m','S','f');"
-            script='export PGPASSWORD="$MASTER_PASSWORD" PGSSLMODE=require; exec psql -X -At -v ON_ERROR_STOP=1 -h "$1" -U "$2" -d "$3" -c '+__import__('shlex').quote(query)
+            script=_verified_pg_env('MASTER_PASSWORD')+'exec psql -X -At -v ON_ERROR_STOP=1 -h "$1" -U "$2" -d "$3" -c '+__import__('shlex').quote(EMPTY_TARGET_QUERY)
             if exec_pg(script).decode().strip()!='0':
                 raise LifecycleError('Target database is not empty; refusing non-idempotent restore')
-            restore_script='export PGPASSWORD="$MASTER_PASSWORD" PGSSLMODE=require; exec pg_restore --exit-on-error --no-owner --no-acl -h "$1" -U "$2" -d "$3"'
+            restore_script=_verified_pg_env('MASTER_PASSWORD')+'exec pg_restore --exit-on-error --no-owner --no-acl -h "$1" -U "$2" -d "$3"'
+            report['restore_attempted'] = True
+            atomic_json_write(report_path, report)
             exec_pg(restore_script,data=archive,timeout=1800)
+            report['archive_restore_completed'] = True
+            atomic_json_write(report_path, report)
             # psql variable interpolation safely quotes password as a SQL literal.
             # Role creation is idempotent; database schema must have been empty.
             sql=("DO $role$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='app_runtime') THEN CREATE ROLE app_runtime LOGIN; END IF; END $role$;\n"
+                "\\getenv pwd APP_PASSWORD\n"
                 "ALTER ROLE app_runtime LOGIN PASSWORD :'pwd';\n"
                 'GRANT CONNECT ON DATABASE "'+db+'" TO app_runtime;\n'
                 'REVOKE CREATE ON SCHEMA public FROM PUBLIC;\n'
                 'GRANT USAGE ON SCHEMA public TO app_runtime;\n'
                 'GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO app_runtime;\n'
                 'GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO app_runtime;\n')
-            role_script='export PGPASSWORD="$MASTER_PASSWORD" PGSSLMODE=require; exec psql -X -v ON_ERROR_STOP=1 -v "pwd=$APP_PASSWORD" -h "$1" -U "$2" -d "$3"'
+            role_script=_verified_pg_env('MASTER_PASSWORD')+'exec psql -X -v ON_ERROR_STOP=1 -h "$1" -U "$2" -d "$3"'
             exec_pg(role_script,data=sql.encode())
-            # Verify real application authentication, not a historical report.
-            check='SELECT current_user,has_schema_privilege(current_user,\'public\',\'USAGE\'),has_schema_privilege(current_user,\'public\',\'CREATE\');'
-            verify_script='export PGPASSWORD="$APP_PASSWORD" PGSSLMODE=require; exec psql -X -At -v ON_ERROR_STOP=1 -h "$1" -U app_runtime -d "$3" -c '+__import__('shlex').quote(check)
-            if exec_pg(verify_script).decode().strip()!='app_runtime|t|f':
-                raise LifecycleError('Application role login/grant verification failed')
-            print('PASS: PostgreSQL restored, app_runtime authenticated and privileges verified')
+            _validate_restored_database(exec_pg)
+            report['restore_succeeded'] = True
+            report['schema_and_permissions_verified'] = True
+            report['alembic_revision'] = EXPECTED_ALEMBIC_REVISION
+        except BaseException as exc:
+            failure = exc
+            report['failure_type'] = type(exc).__name__
         finally:
-            if created_pod:
-                try: call(['kubectl','-n','dev','delete','pod',pod_name,'--wait=true','--timeout=120s'],env=environment(config),timeout=150)
-                except LifecycleError: print('WARNING: Temporary restore pod cleanup failed',file=sys.stderr)
-            if created_secret:
-                try: call(['kubectl','-n','dev','delete','secret',secret_name],env=environment(config))
-                except LifecycleError: print('WARNING: Temporary credential cleanup failed; delete immediately',file=sys.stderr)
+            cleanup = _cleanup_restore_resources(config, pod_name, secret_name)
+            if ca_creation_attempted:
+                try:
+                    call(['kubectl','-n','dev','delete','configmap',ca_name,'--ignore-not-found=true','--wait=true','--timeout=120s'],env=environment(config),timeout=150)
+                    if output(['kubectl','-n','dev','get','configmap',ca_name,'--ignore-not-found','-o','name'],env=environment(config)):
+                        cleanup = False
+                except (LifecycleError, OSError):
+                    cleanup = False
+            report['temporary_resources_cleanup_verified'] = cleanup
+            restore_category, cleanup_category = _restore_failure_categories(
+                failure,
+                restore_attempted=report['restore_attempted'],
+                archive_restore_completed=report['archive_restore_completed'],
+                cleanup_verified=cleanup,
+            )
+            report['restore_failure_category'] = restore_category
+            report['cleanup_failure_category'] = cleanup_category
+            passed = bool(
+                report['restore_succeeded']
+                and report['schema_and_permissions_verified']
+                and cleanup
+            )
+            report['status'] = 'passed' if passed else 'failed'
+            atomic_json_write(report_path, report)
+            checkpoint.update(
+                'database', 'passed' if passed else 'failed',
+                detail=(
+                    'Alembic, schema, permissions and cleanup verified'
+                    if passed else 'Inspect sanitized database restore evidence'
+                ),
+            )
+        if not report['temporary_resources_cleanup_verified']:
+            if failure is not None:
+                raise LifecycleError(
+                    'Database restore failed and temporary-resource cleanup is incomplete'
+                ) from failure
+            raise LifecycleError(
+                'Database restore temporary-resource cleanup is incomplete'
+            )
+        if failure is not None:
+            raise failure
+        print('PASS: PostgreSQL restored; Alembic, schema, permissions and cleanup verified')
+        print('REPORT:', report_path)
     return restore(None)
 
 def platform(config):

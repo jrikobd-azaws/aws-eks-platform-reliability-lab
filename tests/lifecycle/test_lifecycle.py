@@ -128,3 +128,57 @@ def test_plan_rejects_missing_target():
             plan,
             ["module.eks.aws_eks_cluster.this"],
         )
+
+
+@pytest.mark.parametrize("changed", [
+    {"source_revision": "b" * 40},
+    {"database_sha256": "wrong"},
+    {"account": "000000000000"},
+    {"cluster": "wrong"},
+    {"database": "other"},
+    {"schema_verified": False},
+    {"temporary_resources_cleanup_verified": False},
+])
+def test_historical_backup_provenance_rejects_mismatch(monkeypatch, changed):
+    from types import SimpleNamespace
+    from lifecycle import verify_backup_restore_provenance
+    config = SimpleNamespace(expected_account_id="275544662748", cluster_name="lab")
+    backup = {
+        "manifest_data": {"source_revision": "a" * 40},
+        "database_sha256": "checksum", "database": "app",
+    }
+    restore = {
+        "status": "passed", "restore_tested_to_database": True,
+        "schema_verified": True, "runtime_permissions_verified": True,
+        "database_cleanup_verified": True,
+        "temporary_resources_cleanup_verified": True,
+        "source_identity_verified": True,
+        "source_revision": "a" * 40, "database_sha256": "checksum",
+        "account": "275544662748", "cluster": "lab", "database": "app",
+    }
+    restore.update(changed)
+    monkeypatch.setattr("lifecycle._verify_backup_restore_order", lambda *a, **kw: True)
+    with pytest.raises(LifecycleError, match="provenance mismatch"):
+        verify_backup_restore_provenance(config, backup, restore)
+
+
+def test_historical_backup_provenance_accepts_distinct_controller_revision(monkeypatch):
+    from types import SimpleNamespace
+    from lifecycle import verify_backup_restore_provenance
+    config = SimpleNamespace(expected_account_id="275544662748", cluster_name="lab")
+    backup = {
+        "manifest_data": {"source_revision": "a" * 40},
+        "database_sha256": "checksum", "database": "app",
+        "recovery_controller_revision": "b" * 40,
+    }
+    restore = {
+        "status": "passed", "restore_tested_to_database": True,
+        "schema_verified": True, "runtime_permissions_verified": True,
+        "database_cleanup_verified": True,
+        "temporary_resources_cleanup_verified": True,
+        "source_identity_verified": True,
+        "source_revision": "a" * 40, "database_sha256": "checksum",
+        "account": "275544662748", "cluster": "lab", "database": "app",
+    }
+    monkeypatch.setattr("lifecycle._verify_backup_restore_order", lambda *a, **kw: True)
+    assert verify_backup_restore_provenance(config, backup, restore)

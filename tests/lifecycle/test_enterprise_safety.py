@@ -239,7 +239,8 @@ def test_execute_plan_rejects_plan_outside_evidence(tmp_path):
     tfvars.chmod(0o600)
     with patch("lifecycle.account_guard"), \
          patch("lifecycle.checked_inputs", return_value=tfvars), \
-         patch("lifecycle.sha256_file", return_value="fake"):
+         patch("lifecycle.sha256_file", return_value="fake"), \
+         patch("lifecycle.sha256_approved_file", return_value="fake"):
         with pytest.raises(LifecycleError, match="must exist under private lifecycle evidence"):
             execute_plan(config, str(report_file), f"REBUILD-{config.expected_account_id}", str(tfvars))
 
@@ -271,10 +272,29 @@ def test_restore_database_rejects_backup_outside_boundary(tmp_path):
         "database_sha256": "fake",
         "created_utc": "2026-10-20T00:00:00Z"
     }))
+    restore_test_file = tmp_path / "restore-test.json"
+    restore_test_file.write_text(json.dumps({
+        "status": "passed",
+        "source_identity_verified": True,
+        "restore_tested_to_database": True,
+        "schema_verified": True,
+        "runtime_permissions_verified": True,
+        "database_cleanup_verified": True,
+        "temporary_resources_cleanup_verified": True,
+        "source_revision": "a" * 40,
+        "database_sha256": "fake",
+        "account": config.expected_account_id,
+        "cluster": config.cluster_name,
+        "database": "app_db",
+        "created_utc": "2026-10-20T00:00:00Z",
+    }))
     with patch("recovery.account_guard"), \
          patch("recovery.database_connection", return_value=({}, "host.rds.amazonaws.com", "app_db")), \
          patch("recovery.check_db_fresh"), \
-         patch("recovery.age_identity"):
+         patch("recovery.age_identity"), \
+         patch("lifecycle.validate_backup_manifest"), \
+         patch("lifecycle.discover_latest_restore_test", return_value=restore_test_file), \
+         patch("lifecycle.verify_backup_restore_provenance"):
         with pytest.raises(LifecycleError, match="outside authorized storage boundaries"):
             restore_database(config, str(manifest))
 

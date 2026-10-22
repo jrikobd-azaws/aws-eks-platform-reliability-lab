@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import collections
+import http.client
+import ssl
 import base64
 import hashlib
 import json
@@ -90,6 +92,8 @@ class RecoveryBootstrap:
         self.sleep = sleep
         self._owned_tunnel: subprocess.Popen | None = None
         self._argocd_cli: Path | None = None
+        self.verified_server: str | None = None
+        self._session_token: str | None = None
 
     def _capture(self, args, *, timeout=120, env=None) -> str:
         return self.runner.run(args, timeout=timeout, env=env).stdout.strip()
@@ -344,26 +348,156 @@ class RecoveryBootstrap:
         return path
 
     def _kubeconfig_matches(self, path: Path, cluster: dict) -> bool:
+        """Compare the selected isolated context with verified EKS identity."""
         if not path.is_file() or path.is_symlink():
             return False
         if stat.S_IMODE(path.stat().st_mode) & 0o077:
             return False
-        env = self.config.environment()
-        env["KUBECONFIG"] = str(path)
+
         try:
-            current = self._capture(["kubectl", "config", "current-context"], env=env)
-            view = self._json(["kubectl", "config", "view", "--minify", "-o", "json"], env=env)
-        except LifecycleError:
+            with path.open("r", encoding="utf-8") as stream:
+                config = yaml.safe_load(stream)
+
+            if not isinstance(config, dict):
+                return False
+
+            current = config.get("current-context")
+            contexts = [
+                item["context"]
+                for item in config.get("contexts", [])
+                if isinstance(item, dict)
+                and item.get("name") == current
+            ]
+
+            if not current or len(contexts) != 1:
+                return False
+
+            selected = contexts[0]
+            cluster_name = selected.get("cluster")
+
+            clusters = [
+                item["cluster"]
+                for item in config.get("clusters", [])
+                if isinstance(item, dict)
+                and item.get("name") == cluster_name
+            ]
+
+            if len(clusters) != 1:
+                return False
+
+            live = clusters[0]
+
+            user_name = selected.get("user")
+            users = [
+                item["user"]
+                for item in config.get("users", [])
+                if isinstance(item, dict)
+                and item.get("name") == user_name
+            ]
+
+            if not user_name or len(users) != 1:
+                return False
+
+            authentication = users[0]
+            if not isinstance(authentication, dict):
+                return False
+
+            command = authentication.get("exec", {})
+            if not isinstance(command, dict):
+                return False
+
+            if command.get("command") != "aws":
+                return False
+
+            args = command.get("args", [])
+            if not isinstance(args, list):
+                return False
+            if not all(isinstance(arg, str) for arg in args):
+                return False
+
+            # Parse the approved AWS CLI global options and EKS command.
+            # AWS-generated kubeconfigs may place --region before eks get-token.
+            options = {}
+            tokens = []
+            allowed_options = {
+                "--region", "--cluster-name",
+                "--cluster-id", "--output",
+            }
+
+            i = 0
+            while i < len(args):
+                item = args[i]
+
+                if item in allowed_options:
+                    if item in options or i + 1 >= len(args):
+                        return False
+                    value = args[i + 1]
+                    if not value or value.startswith("-"):
+                        return False
+                    options[item] = value
+                    i += 2
+                    continue
+
+                if item.startswith("-"):
+                    return False
+
+                tokens.append(item)
+                i += 1
+
+            if tokens != ["eks", "get-token"]:
+                return False
+
+            if options.get("--region") != self.config.aws_region:
+                return False
+
+            if options.get("--output") != "json":
+                return False
+
+            cluster_name = options.get("--cluster-name")
+            cluster_id = options.get("--cluster-id")
+
+            if (cluster_name is None) == (cluster_id is None):
+                return False
+
+            if cluster_name is not None:
+                if cluster_name != self.config.cluster_name:
+                    return False
+            elif cluster_id != cluster.get("arn"):
+                return False
+
+            exec_env = command.get("env", [])
+            if not isinstance(exec_env, list):
+                return False
+            for item in exec_env:
+                if not isinstance(item, dict):
+                    return False
+                if set(item) != {"name", "value"}:
+                    return False
+                if item["name"] != "AWS_PROFILE":
+                    return False
+                if not isinstance(item["value"], str) or not item["value"]:
+                    return False
+
+            expected_ca = base64.b64decode(
+                cluster["certificateAuthority"]["data"],
+                validate=True,
+            )
+            actual_ca = base64.b64decode(
+                live["certificate-authority-data"],
+                validate=True,
+            )
+
+            return (
+                bool(selected.get("user"))
+                and live.get("server") == cluster.get("endpoint")
+                and actual_ca == expected_ca
+            )
+
+        except (
+            OSError, KeyError, TypeError, ValueError,
+            yaml.YAMLError,
+        ):
             return False
-        clusters = view.get("clusters", [])
-        if not current or len(clusters) != 1:
-            return False
-        live = clusters[0].get("cluster", {})
-        return (
-            live.get("server") == cluster.get("endpoint")
-            and live.get("certificate-authority-data")
-            == cluster.get("certificateAuthority", {}).get("data")
-        )
 
     def _ensure_kubeconfig(self, cluster: dict, *, auto_repair: bool) -> Path:
         self._tool("kubectl")
@@ -466,14 +600,113 @@ class RecoveryBootstrap:
         except OSError:
             return False
 
+    def _argocd_admin_password(self) -> str:
+        """Retrieve the Argo CD initial admin password from the approved secret.
+
+        This is the standard Argo CD credential source (Kubernetes secret
+        ``argocd-initial-admin-secret``), not a password reset.  The value
+        is never logged or returned to callers.
+        """
+        raw = self._capture([
+            "kubectl", "-n", "argocd", "get", "secret",
+            "argocd-initial-admin-secret",
+            "-o", "jsonpath={.data.password}",
+        ], timeout=30, env=self.config.environment())
+        if not raw:
+            raise LifecycleError("Argo CD initial admin secret is unavailable")
+        password = base64.b64decode(raw).decode()
+        if not password:
+            raise LifecycleError("Argo CD initial admin password is empty")
+        return password
+
+    @staticmethod
+    def _argocd_auth_failure(exc: LifecycleError) -> bool:
+        """Only explicit authentication rejection permits a credential refresh."""
+        detail = str(exc).upper()
+        return "UNAUTHENTICATED" in detail or "CATEGORY=ARGOCD_AUTH" in detail
+
+    def _argocd_login(self, cli: Path, server: str) -> None:
+        """Create an in-memory Argo CD session over authenticated TLS.
+
+        Trust is anchored in the deployed Argo CD server TLS certificate,
+        retrieved from the already verified Kubernetes destination. A localhost
+        tunnel is not by itself a server identity guarantee.
+        """
+        password = self._argocd_admin_password()
+        cert_secret = self._json([
+            "kubectl", "-n", "argocd", "get", "secret", "argocd-secret",
+            "-o", "json",
+        ], env=self.config.environment())
+        try:
+            pem = base64.b64decode(cert_secret["data"]["tls.crt"], validate=True).decode("ascii")
+            if "-----BEGIN CERTIFICATE-----" not in pem:
+                raise ValueError("Invalid certificate")
+        except (KeyError, TypeError, ValueError, UnicodeError) as exc:
+            raise LifecycleError("ARGOCD_TLS_TRUST_UNAVAILABLE: approved server certificate missing") from None
+        # Authenticate the certificate against the Kubernetes Service DNS name,
+        # while TCP traffic traverses the localhost-only port-forward.
+        context = ssl.create_default_context(cadata=pem)
+        expected_name = "argocd-server"
+        port = int(server.rsplit(":", 1)[1])
+        token = None
+        try:
+            connection = http.client.HTTPSConnection("127.0.0.1", port, timeout=20, context=context)
+            # Override SNI/hostname verification, not the TCP tunnel destination.
+            def verified_connect():
+                sock = socket.create_connection(("127.0.0.1", port), timeout=20)
+                try:
+                    connection.sock = context.wrap_socket(sock, server_hostname=expected_name)
+                except BaseException:
+                    sock.close()
+                    raise
+            connection.connect = verified_connect
+            try:
+                payload = json.dumps({"username": "admin", "password": password}).encode()
+                connection.request("POST", "/api/v1/session", body=payload,
+                                   headers={"Content-Type": "application/json"})
+                response = connection.getresponse()
+                if response.status != 200:
+                    raise LifecycleError("ARGOCD_AUTHENTICATION_FAILED: session API rejected approved credential")
+                body = response.read(65537)
+                if len(body) > 65536:
+                    raise LifecycleError("ARGOCD_AUTHENTICATION_FAILED: oversized session response")
+                value = json.loads(body)
+                token = value.get("token") if isinstance(value, dict) else None
+                if not isinstance(token, str) or not token:
+                    raise LifecycleError("ARGOCD_AUTHENTICATION_FAILED: missing session token")
+            finally:
+                connection.close()
+        except (ssl.SSLError, OSError, TimeoutError) as exc:
+            raise LifecycleError("ARGOCD_TLS_OR_TRANSPORT_FAILED: verified session unavailable") from None
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise LifecycleError("ARGOCD_AUTHENTICATION_FAILED: malformed session response") from None
+        finally:
+            del password
+        self._session_token = token
+
     def _verify_argocd_auth(self, cli: Path, server: str) -> None:
+        """Verify Application API access, not just account queries.
+
+        ``argocd account get-user-info`` can return exit 0 with an
+        expired or server-mismatched token, but ``argocd app list``
+        requires a valid token for the exact server address.
+        """
+        env = self.config.environment()
+        if self._session_token:
+            env["ARGOCD_AUTH_TOKEN"] = self._session_token
         self.runner.run([
             cli, "account", "get-user-info", "--server", server,
-        ], timeout=30)
+        ], timeout=30, env=env)
+        self.runner.run([
+            cli, "app", "list", "--server", server,
+        ], timeout=30, env=env)
+        self.runner.run([
+            cli, "app", "get", "platform-root", "-o", "json", "--server", server,
+        ], timeout=30, env=env)
 
     @contextlib.contextmanager
     def argocd_session(self) -> Iterator[str]:
-        """Reuse authenticated localhost state and own only a new tunnel."""
+        """Reuse verified localhost context; refresh only on explicit auth rejection."""
         cli = self._argocd_cli or self._argocd_tool()
         server = self._argocd_server(cli)
         port = int(server.rsplit(":", 1)[1])
@@ -481,8 +714,21 @@ class RecoveryBootstrap:
         os.environ["PATH"] = str(cli.parent) + os.pathsep + (previous_path or "")
         try:
             if self._listening(port):
-                self._verify_argocd_auth(cli, server)
-                print("PASS: reused authenticated localhost Argo CD session", flush=True)
+                try:
+                    self._verify_argocd_auth(cli, server)
+                    print("PASS: reused authenticated localhost Argo CD session", flush=True)
+                except LifecycleError as exc:
+                    if not self._argocd_auth_failure(exc):
+                        raise
+                    print(
+                        f"{self.action_class('argocd_local_tunnel').value}: "
+                        "refreshing Argo CD credentials for current server",
+                        flush=True,
+                    )
+                    self._argocd_login(cli, server)
+                    self._verify_argocd_auth(cli, server)
+                    print("PASS: Argo CD credentials refreshed and Application API verified", flush=True)
+                self.verified_server = server
                 yield server
                 return
 
@@ -514,7 +760,15 @@ class RecoveryBootstrap:
                     self.sleep(0.25)
                 else:
                     raise LifecycleError("Argo CD port-forward did not become ready")
-                self._verify_argocd_auth(cli, server)
+                # Try existing approved CLI context before any credential refresh.
+                try:
+                    self._verify_argocd_auth(cli, server)
+                except LifecycleError as exc:
+                    if not self._argocd_auth_failure(exc):
+                        raise
+                    self._argocd_login(cli, server)
+                    self._verify_argocd_auth(cli, server)
+                self.verified_server = server
                 yield server
             finally:
                 if self._owned_tunnel is process and process.poll() is None:
@@ -526,6 +780,7 @@ class RecoveryBootstrap:
                         process.wait(timeout=5)
                 self._owned_tunnel = None
         finally:
+            self._session_token = None
             if previous_path is None:
                 os.environ.pop("PATH", None)
             else:

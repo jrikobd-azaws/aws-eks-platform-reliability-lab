@@ -1,6 +1,7 @@
 """Offline tests for Lifecycle Batch 2 platform recovery hardening."""
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import Mock
@@ -20,6 +21,7 @@ from recover_platform import (
     PLATFORM_STAGES,
     STAGE3_REVISION,
     PlatformRecovery,
+    sanitized_failure,
     validate_source_contract,
 )
 
@@ -517,6 +519,7 @@ def test_batch2_lbc_unknown_fails_closed(tmp_path):
 
 def test_batch2_lbc_healthy_drift_not_synchronized(tmp_path):
     recovery = manager(tmp_path)
+    recovery.argocd_server = "127.0.0.1:8443"
     recovery._load_balancer_controller_state = Mock(
         return_value="healthy"
     )
@@ -538,3 +541,356 @@ def test_batch2_lbc_degraded_not_synchronized(tmp_path):
     with pytest.raises(LifecycleError, match="Degraded"):
         recovery.restore_controllers()
     recovery._sync_application.assert_not_called()
+
+
+# --- Lifecycle Batch 2: Argo CD --server propagation regression tests ---
+
+
+def test_argocd_server_arg_present_in_app_get(tmp_path, monkeypatch):
+    """Verify --server is passed to every argocd app get CLI call."""
+    recovery = manager(tmp_path)
+    recovery.argocd_server = "127.0.0.1:8443"
+    recovery.verify_identity = Mock(return_value={})
+    monkeypatch.setattr("recover_platform.shutil.which", lambda *a, **kw: "/usr/local/bin/argocd")
+
+    live = {
+        "metadata": {
+            "uid": "uid-1", "name": "platform-root", "namespace": "argocd",
+        },
+        "spec": {
+            "destination": {"server": "https://kubernetes.default.svc"},
+            "syncPolicy": {},
+        },
+    }
+    recovery._get_application = Mock(return_value=live)
+    recovery.json = Mock(return_value=live)
+
+    recovery._verified_argocd_application("platform-root")
+
+    call_args = recovery.json.call_args.args[0]
+    assert "--server" in call_args
+    assert "127.0.0.1:8443" in call_args
+    assert call_args[0] == "argocd"
+    assert "app" in call_args
+    assert "get" in call_args
+
+
+def test_argocd_server_arg_present_in_app_sync(tmp_path, monkeypatch):
+    """Verify --server is passed to every argocd app sync CLI call."""
+    recovery = manager(tmp_path)
+    recovery.argocd_server = "127.0.0.1:8443"
+    recovery.verify_identity = Mock(return_value={})
+    monkeypatch.setattr("recover_platform.shutil.which", lambda *a, **kw: "/usr/local/bin/argocd")
+
+    live = {
+        "metadata": {
+            "uid": "uid-1", "name": "observability", "namespace": "argocd",
+        },
+        "spec": {
+            "destination": {"server": "https://kubernetes.default.svc"},
+            "syncPolicy": {},
+        },
+    }
+    recovery._get_application = Mock(return_value=live)
+    recovery.json = Mock(return_value=live)
+    recovery.run = Mock()
+
+    recovery._sync_application("observability")
+
+    sync_call = next(
+        c for c in recovery.run.call_args_list
+        if "sync" in c.args[0]
+    )
+    assert "--server" in sync_call.args[0]
+    assert "127.0.0.1:8443" in sync_call.args[0]
+
+
+def test_argocd_server_arg_present_in_app_wait(tmp_path):
+    """Verify --server is passed to every argocd app wait CLI call."""
+    recovery = manager(tmp_path)
+    recovery.argocd_server = "127.0.0.1:8443"
+    recovery._load_balancer_controller_state = Mock(
+        side_effect=["absent", "healthy"]
+    )
+    recovery._sync_application = Mock()
+
+    wait_calls = []
+
+    def fake_run(args, **kwargs):
+        if "argocd" in args and "wait" in args:
+            wait_calls.append(list(args))
+        return b""
+
+    recovery.run = Mock(side_effect=fake_run)
+    recovery.restore_controllers()
+
+    assert len(wait_calls) >= 2
+    for call in wait_calls:
+        assert "--server" in call
+        assert "127.0.0.1:8443" in call
+
+
+def test_missing_argocd_server_blocks_sync(tmp_path):
+    """Without a verified session, argocd CLI calls must fail closed."""
+    recovery = manager(tmp_path)
+    recovery.argocd_server = None
+
+    with pytest.raises(LifecycleError, match="no verified session"):
+        recovery._argocd_server_arg()
+
+
+def test_lab_argocd_server_env_override(tmp_path, monkeypatch):
+    """LAB_ARGOCD_SERVER env var provides the server when no session is active."""
+    monkeypatch.setenv("LAB_ARGOCD_SERVER", "127.0.0.1:9999")
+    recovery = manager(tmp_path)
+    recovery.argocd_server = None
+    args = recovery._argocd_server_arg()
+    assert args == ["--server", "127.0.0.1:9999"]
+
+
+def test_recover_propagates_verified_server_to_platform_recovery(tmp_path, monkeypatch):
+    """recover() must capture the verified server from argocd_session()."""
+    import recover_platform as rp
+    from contextlib import contextmanager
+    from bootstrap import BootstrapIdentity
+
+    recovery = manager(tmp_path)
+    recovery.bootstrap = Mock()
+    recovery.bootstrap.prepare.return_value = BootstrapIdentity(
+        account_id="275544662748",
+        region="eu-west-1",
+        cluster_arn="arn:aws:eks:eu-west-1:275544662748:cluster/eks-platform-reliability-lab",
+        terraform_workspace="default",
+        terraform_lineage="lineage-1",
+        terraform_serial=1,
+        source_revision="a" * 40,
+        evidence_root=str(tmp_path.resolve()),
+        kubeconfig=str(tmp_path / "kubeconfig"),
+        argocd_cli="/approved/argocd",
+        backend_fingerprint="b" * 64,
+    )
+
+    @contextmanager
+    def fake_session():
+        yield "127.0.0.1:8443"
+
+    recovery.bootstrap.argocd_session = fake_session
+    monkeypatch.setattr(rp, "validate_source_contract", lambda: None)
+    monkeypatch.setattr(recovery, "verify_identity", Mock())
+    monkeypatch.setattr(recovery, "_argocd_release", lambda: {
+        "chart": "argo-cd-10.10.3", "revision": 1, "status": "deployed"
+    })
+
+    captured_server = []
+
+    def fake_run_stage(name, ready, action):
+        if name != "argocd":
+            captured_server.append(recovery.argocd_server)
+
+    monkeypatch.setattr(recovery, "run_stage", fake_run_stage)
+    recovery.recover()
+
+    assert all(s == "127.0.0.1:8443" for s in captured_server)
+    assert len(captured_server) > 0
+
+
+def test_argocd_cli_k8s_identity_match_with_server(tmp_path, monkeypatch):
+    """CLI and Kubernetes must agree on Application identity when --server is supplied."""
+    recovery = manager(tmp_path)
+    recovery.argocd_server = "127.0.0.1:8443"
+    recovery.verify_identity = Mock(return_value={})
+    monkeypatch.setattr("recover_platform.shutil.which", lambda *a, **kw: "/usr/local/bin/argocd")
+
+    live = {
+        "metadata": {
+            "uid": "uid-approved", "name": "stage3-dev", "namespace": "argocd",
+        },
+        "spec": {
+            "destination": {"server": "https://kubernetes.default.svc"},
+            "syncPolicy": {},
+        },
+    }
+    recovery._get_application = Mock(return_value=live)
+    recovery.json = Mock(return_value=live)
+
+    result = recovery._verified_argocd_application("stage3-dev")
+    assert result == live
+    cli_call = recovery.json.call_args.args[0]
+    assert "--server" in cli_call
+
+
+def test_argocd_cli_identity_mismatch_with_server_blocks(tmp_path, monkeypatch):
+    """Identity mismatch must block even when --server is correctly supplied."""
+    recovery = manager(tmp_path)
+    recovery.argocd_server = "127.0.0.1:8443"
+    recovery.verify_identity = Mock(return_value={})
+    monkeypatch.setattr("recover_platform.shutil.which", lambda *a, **kw: "/usr/local/bin/argocd")
+
+    live = {
+        "metadata": {
+            "uid": "uid-approved", "name": "platform-root", "namespace": "argocd",
+        },
+        "spec": {
+            "destination": {"server": "https://kubernetes.default.svc"},
+            "syncPolicy": {},
+        },
+    }
+    cli_response = json.loads(json.dumps(live))
+    cli_response["metadata"]["uid"] = "uid-different"
+    recovery._get_application = Mock(return_value=live)
+    recovery.json = Mock(return_value=cli_response)
+    recovery.run = Mock()
+
+    with pytest.raises(LifecycleError, match="identity mismatch"):
+        recovery._sync_application("platform-root")
+
+    recovery.run.assert_not_called()
+
+
+def test_manual_sync_enforced_with_server(tmp_path, monkeypatch):
+    """Automatic sync policy must block even when --server is supplied."""
+    recovery = manager(tmp_path)
+    recovery.argocd_server = "127.0.0.1:8443"
+    recovery.verify_identity = Mock(return_value={})
+    monkeypatch.setattr("recover_platform.shutil.which", lambda *a, **kw: "/usr/local/bin/argocd")
+
+    auto_sync = {
+        "metadata": {
+            "uid": "uid-1", "name": "observability", "namespace": "argocd",
+        },
+        "spec": {
+            "destination": {"server": "https://kubernetes.default.svc"},
+            "syncPolicy": {"automated": {"prune": True}},
+        },
+    }
+    recovery._get_application = Mock(return_value=auto_sync)
+    recovery.json = Mock(return_value=auto_sync)
+    recovery.run = Mock()
+
+    with pytest.raises(LifecycleError, match="manual synchronization"):
+        recovery._sync_application("observability")
+
+    recovery.run.assert_not_called()
+
+
+def test_no_prune_no_force_with_server(tmp_path, monkeypatch):
+    """Unsafe sync options must be blocked even when --server is supplied."""
+    recovery = manager(tmp_path)
+    recovery.argocd_server = "127.0.0.1:8443"
+    recovery.verify_identity = Mock(return_value={})
+    monkeypatch.setattr("recover_platform.shutil.which", lambda *a, **kw: "/usr/local/bin/argocd")
+
+    live = {
+        "metadata": {
+            "uid": "uid-1", "name": "observability", "namespace": "argocd",
+        },
+        "spec": {
+            "destination": {"server": "https://kubernetes.default.svc"},
+            "syncPolicy": {},
+        },
+    }
+    recovery._get_application = Mock(return_value=live)
+    recovery.json = Mock(return_value=live)
+    recovery.run = Mock()
+
+    with pytest.raises(LifecycleError, match="Unsafe Argo CD"):
+        recovery._sync_application("observability", "--prune")
+
+    with pytest.raises(LifecycleError, match="Unsafe Argo CD"):
+        recovery._sync_application("observability", "--force")
+
+
+# --- Lifecycle Batch 2: exit-code-20 classification regression tests ---
+
+
+def test_exit_code_20_classified_as_argocd_server_selection():
+    """Argo CD CLI exit code 20 must be classified as ARGOCD_SERVER_SELECTION."""
+    import lifecycle as n
+
+    error = subprocess.CalledProcessError(
+        20, ["argocd", "app", "get", "platform-root", "-o", "json"]
+    )
+    assert n._classify_subprocess_error(error) == "ARGOCD_SERVER_SELECTION"
+
+
+def test_exit_code_20_non_argocd_is_unclassified():
+    """Exit code 20 from non-argocd binaries remains UNCLASSIFIED."""
+    import lifecycle as n
+
+    error = subprocess.CalledProcessError(
+        20, ["kubectl", "get", "pods"]
+    )
+    assert n._classify_subprocess_error(error) == "UNCLASSIFIED"
+
+
+def test_call_error_message_includes_category_for_argocd_exit_20(monkeypatch):
+    """LifecycleError from argocd exit 20 must include the ARGOCD_SERVER_SELECTION category."""
+    import lifecycle as n
+
+    error = subprocess.CalledProcessError(
+        20, ["argocd", "app", "get", "platform-root", "-o", "json"]
+    )
+    monkeypatch.setattr(subprocess, "run", Mock(side_effect=error))
+    with pytest.raises(LifecycleError) as exc:
+        n.call(["argocd", "app", "get", "platform-root", "-o", "json"])
+    assert "ARGOCD_SERVER_SELECTION" in str(exc.value)
+    assert "exit=20" in str(exc.value)
+
+
+# --- Lifecycle Batch 2: sanitized_failure structured reporting tests ---
+
+
+def test_sanitized_failure_classifies_argocd_server_selection():
+    """sanitized_failure must classify exit-code-20 errors correctly."""
+    exc = LifecycleError(
+        "Command failed: argocd (exit=20; category=ARGOCD_SERVER_SELECTION; "
+        "private stderr suppressed)"
+    )
+    message = sanitized_failure(exc)
+    assert "ARGOCD_SERVER_SELECTION" in message
+    assert "Corrective action" in message
+    assert "Retry:" in message
+    assert "session" in message.lower()
+
+
+def test_sanitized_failure_classifies_identity_mismatch():
+    """sanitized_failure must classify identity mismatch as requiring approval."""
+    exc = LifecycleError("Argo CD CLI Application identity mismatch")
+    message = sanitized_failure(exc)
+    assert "IDENTITY_MISMATCH" in message
+    assert "requires approval" in message
+
+
+def test_sanitized_failure_classifies_non_empty_database():
+    """sanitized_failure must classify non-empty database as requiring approval."""
+    exc = LifecycleError("Target database is not empty")
+    message = sanitized_failure(exc)
+    assert "NON_EMPTY_TARGET" in message
+    assert "requires approval" in message
+
+
+def test_sanitized_failure_classifies_unsafe_sync_option():
+    """sanitized_failure must classify prune/force as safe-after-correction."""
+    exc = LifecycleError("Unsafe Argo CD synchronization option")
+    message = sanitized_failure(exc)
+    assert "UNSAFE_SYNC_OPTION" in message
+    assert "safe after correction" in message
+
+
+def test_sanitized_failure_still_redacts_secrets():
+    """Structured reporting must still redact sensitive values."""
+    exc = LifecycleError(
+        "login failed password=secret123 token:abc456"
+    )
+    message = sanitized_failure(exc)
+    assert "secret123" not in message
+    assert "abc456" not in message
+    assert "[REDACTED]" in message
+
+
+def test_sanitized_failure_for_non_lifecycle_error():
+    """Non-LifecycleError must be reported as BLOCKED with investigation required."""
+    exc = RuntimeError("unexpected failure")
+    message = sanitized_failure(exc)
+    assert message.startswith("BLOCKED: RuntimeError")
+    assert "requires investigation" in message

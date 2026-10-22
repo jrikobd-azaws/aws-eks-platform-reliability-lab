@@ -549,6 +549,15 @@ def validate_command_argv(argv):
     return validated
 
 
+def _classify_subprocess_error(exc):
+    """Classify subprocess failures into actionable categories."""
+    if exc.returncode == 20 and str(exc.cmd[0]).endswith("argocd"):
+        return "ARGOCD_SERVER_SELECTION"
+    if exc.returncode in (1, 20):
+        return "ARGOCD_SERVER_SELECTION" if str(exc.cmd[0]).endswith("argocd") else "UNCLASSIFIED"
+    return "UNCLASSIFIED"
+
+
 def call(argv, *, data=None, timeout=1200, env=None):
     """Binary-safe subprocess call; never display stderr, which may contain secrets."""
     checked_argv = validate_command_argv(argv)
@@ -562,9 +571,10 @@ def call(argv, *, data=None, timeout=1200, env=None):
             '(private stderr suppressed)'
         ) from None
     except subprocess.CalledProcessError as exc:
+        category = _classify_subprocess_error(exc)
         raise LifecycleError(
             f'Command failed: {argv[0]} (exit={exc.returncode}; '
-            'private stderr suppressed)'
+            f'category={category}; private stderr suppressed)'
         ) from None
 
 def output(argv, **kwargs):
@@ -643,7 +653,7 @@ def create_plan(config, tfvars, kind):
     checked=assert_plan_policy(plan_json(config,saved),targets,action='delete' if kind=='shutdown' else 'create')
     # A rebuild must only create managed resources. Retained resources must be no-ops.
     summary={'schema':1,'kind':kind,'created_utc':utc_now(),'account':config.expected_account_id,
-        'region':config.aws_region,'cluster':config.cluster_name,'tfvars_sha256':sha256_file(var),
+        'region':config.aws_region,'cluster':config.cluster_name,'tfvars_sha256':sha256_approved_file(var),
         'plan':str(saved),'plan_sha256':sha256_file(saved),'targets':targets,'policy':checked,
         'state_lineage':None}
     state=json.loads(call(['terraform',f'-chdir={TF}','state','pull'],env=environment(config)))
@@ -675,7 +685,7 @@ def execute_plan(config, report, confirmation, tfvars):
     if confirmation!=required:
         raise LifecycleError('Explicit confirmation required: '+required)
     var=checked_inputs(tfvars)
-    if sha256_file(var)!=info['tfvars_sha256']:
+    if sha256_approved_file(var)!=info['tfvars_sha256']:
         raise LifecycleError('Terraform inputs changed since plan')
     raw_plan = Path(info.get('plan', ''))
     if raw_plan.is_symlink():
@@ -835,7 +845,28 @@ def discover_latest_backup_manifest(config):
     return _private_evidence_file(config, candidates[-1], "backup manifest")
 
 
-def validate_backup_manifest(config, manifest_path=None):
+
+def sha256_approved_file(path: Path) -> str:
+    """Hash a file already validated against explicit recovery boundaries."""
+    path = Path(path)
+    if not path.is_file() or path.is_symlink():
+        raise LifecycleError("Approved archive file unavailable")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_backup_manifest(config, manifest_path=None, *, historical_dev=False):
+    if historical_dev and (
+        config.expected_account_id != "275544662748"
+        or config.aws_region != "eu-west-1"
+        or config.cluster_name != "eks-platform-reliability-lab"
+    ):
+        raise LifecycleError(
+            "Historical recovery point permitted only for approved DEV lab"
+        )
     _require_tools("age", "pg_restore", "git")
     latest = discover_latest_backup_manifest(config)
     manifest = (
@@ -853,19 +884,70 @@ def validate_backup_manifest(config, manifest_path=None):
         or data.get("cluster") != config.cluster_name
         or data.get("database") != database
         or data.get("rds_endpoint") != host
-        or data.get("rds_master_secret_arn") != values.get("rds_master_secret_arn")
-        or data.get("source_revision") != source_revision
+        or not re.fullmatch(r"[0-9a-f]{40}", str(data.get("source_revision", "")))
+        or (not historical_dev and data["source_revision"] != source_revision)
     ):
         raise LifecycleError("Backup identity does not match the current environment and source")
+    # Historical secret identity is immutable backup provenance. The current
+    # destination must instead be bound to the live recreated RDS instance.
+    historical_secret = data.get("rds_master_secret_arn")
+    current_secret = values.get("rds_master_secret_arn")
+    if not isinstance(historical_secret, str) or not historical_secret:
+        raise LifecycleError("Historical backup master-secret identity missing")
+    if not isinstance(current_secret, str) or not current_secret:
+        raise LifecycleError("Current RDS master-secret identity missing")
+    rds = json.loads(output([
+        "aws", "rds", "describe-db-instances", "--db-instance-identifier",
+        config.cluster_name + "-postgres", "--output", "json",
+    ], env=environment(config)))
+    instances = rds.get("DBInstances", [])
+    if len(instances) != 1:
+        raise LifecycleError("Current RDS instance identity ambiguous")
+    instance = instances[0]
+    if (instance.get("DBInstanceStatus") != "available"
+            or instance.get("Endpoint", {}).get("Address") != host
+            or instance.get("MasterUserSecret", {}).get("SecretArn") != current_secret):
+        raise LifecycleError("Current RDS master-secret ownership mismatch")
+    # A replaced secret is accepted only with a matching successful historical
+    # restore test; do not silently reinterpret an old backup as a new one.
+    if historical_secret != current_secret:
+        restore_path = discover_latest_restore_test(config)
+        restore = json.loads(restore_path.read_text())
+        if not (
+            restore.get("status") == "passed"
+            and restore.get("source_identity_verified") is True
+            and restore.get("restore_tested_to_database") is True
+            and restore.get("schema_verified") is True
+            and restore.get("runtime_permissions_verified") is True
+            and restore.get("database_cleanup_verified") is True
+            and restore.get("temporary_resources_cleanup_verified") is True
+            and restore.get("source_revision") == data["source_revision"]
+            and restore.get("database_sha256") == data.get("database_sha256")
+            and restore.get("account") == config.expected_account_id
+            and restore.get("cluster") == config.cluster_name
+            and restore.get("database") == database
+        ):
+            raise LifecycleError("Historical backup restore-test provenance mismatch")
+        _verify_backup_restore_order(data, restore, historical_dev=historical_dev)
+    # Historical recovery evidence may belong to an accepted
+    # certification worktree rather than the current checkout.
+    historical_roots = (
+        config.evidence_dir.resolve(),
+        (Path.home() / ".local/share/eks-lab-backups").resolve(),
+    )
     backup = validate_path_boundary(
-        Path(data.get("database_backup", "")), description="Encrypted database backup"
+        Path(data.get("database_backup", "")),
+        allowed_roots=historical_roots,
+        description="Encrypted database backup",
     )
     source = validate_path_boundary(
-        Path(data.get("source_archive", "")), description="Source checkpoint"
+        Path(data.get("source_archive", "")),
+        allowed_roots=historical_roots,
+        description="Source checkpoint",
     )
-    if sha256_file(backup) != data.get("database_sha256"):
+    if sha256_approved_file(backup) != data.get("database_sha256"):
         raise LifecycleError("Encrypted backup checksum mismatch")
-    if sha256_file(source) != data.get("source_sha256"):
+    if sha256_approved_file(source) != data.get("source_sha256"):
         raise LifecycleError("Source checkpoint checksum mismatch")
     key = age_identity()
     archive = call(["age", "-d", "-i", str(key), str(backup)])
@@ -877,7 +959,8 @@ def validate_backup_manifest(config, manifest_path=None):
         "manifest_data": data,
         "backup": backup,
         "database_sha256": data["database_sha256"],
-        "source_revision": source_revision,
+        "source_revision": data["source_revision"],
+        "recovery_controller_revision": source_revision,
         "archive": archive,
         "values": values,
         "host": host,
@@ -1341,13 +1424,57 @@ def _certification_datetime(value, description):
     return created
 
 
-def _verify_backup_restore_order(backup, restore):
-    backup_created = _certification_datetime(
-        backup.get("created_utc"), "Backup"
+def verify_backup_restore_provenance(config, backup, restore, *, historical_dev=False):
+    """Bind historical backup provenance to a successful isolated restore test.
+
+    The current recovery-controller revision is intentionally independent of
+    the immutable source revision recorded when the archive was created.
+    """
+    manifest = backup["manifest_data"]
+    required = (
+        restore.get("status") == "passed"
+        and restore.get("restore_tested_to_database") is True
+        and restore.get("schema_verified") is True
+        and restore.get("runtime_permissions_verified") is True
+        and restore.get("database_cleanup_verified") is True
+        and restore.get("temporary_resources_cleanup_verified") is True
+        and restore.get("source_identity_verified") is True
+        and restore.get("source_revision") == manifest.get("source_revision")
+        and restore.get("database_sha256") == backup["database_sha256"]
+        and restore.get("account") == config.expected_account_id
+        and restore.get("cluster") == config.cluster_name
+        and restore.get("database") == backup["database"]
     )
-    restore_created = _certification_datetime(
-        restore.get("created_utc"), "Restore-test"
-    )
+    if not required:
+        raise LifecycleError("Backup and isolated restore-test provenance mismatch")
+    if historical_dev:
+        if (config.expected_account_id != "275544662748"
+                or config.aws_region != "eu-west-1"
+                or config.cluster_name != "eks-platform-reliability-lab"):
+            raise LifecycleError("Historical recovery point permitted only for approved DEV lab")
+    _verify_backup_restore_order(manifest, restore, historical_dev=historical_dev)
+    return True
+
+
+def _verify_backup_restore_order(backup, restore, *, historical_dev=False):
+    if historical_dev:
+        # Historical DEV recovery permits age, never future evidence.
+        def historical_time(value, label):
+            try:
+                created = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if created.tzinfo is None:
+                    raise ValueError("Timezone missing")
+                created = created.astimezone(dt.timezone.utc)
+            except (AttributeError, TypeError, ValueError):
+                raise LifecycleError("Invalid " + label + " timestamp") from None
+            if created > dt.datetime.now(dt.timezone.utc):
+                raise LifecycleError(label + " timestamp is in the future")
+            return created
+        backup_created = historical_time(backup.get("created_utc"), "Backup")
+        restore_created = historical_time(restore.get("created_utc"), "Restore-test")
+    else:
+        backup_created = _certification_datetime(backup.get("created_utc"), "Backup")
+        restore_created = _certification_datetime(restore.get("created_utc"), "Restore-test")
 
     if restore_created < backup_created:
         raise LifecycleError(
@@ -1392,24 +1519,7 @@ def certify_shutdown(config, *, plan_report, tfvars, confirmation):
     backup = validate_backup_manifest(config)
     restore_path = discover_latest_restore_test(config)
     restore = json.loads(restore_path.read_text())
-    _verify_backup_restore_order(
-        backup["manifest_data"], restore
-    )
-    required_restore = (
-        restore.get("status") == "passed"
-        and restore.get("restore_tested_to_database") is True
-        and restore.get("schema_verified") is True
-        and restore.get("runtime_permissions_verified") is True
-        and restore.get("database_cleanup_verified") is True
-        and restore.get("temporary_resources_cleanup_verified") is True
-        and restore.get("source_identity_verified") is True
-        and restore.get("database_sha256") == backup["database_sha256"]
-        and restore.get("source_revision") == source_revision
-        and restore.get("account") == config.expected_account_id
-        and restore.get("cluster") == config.cluster_name
-    )
-    if not required_restore:
-        raise LifecycleError("Restore-test evidence is incomplete or belongs to another source")
+    verify_backup_restore_provenance(config, backup, restore)
     live = verify_shutdown_live_gates(config)
     readiness = {
         "schema": 1,
