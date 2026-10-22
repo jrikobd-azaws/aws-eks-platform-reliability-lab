@@ -675,7 +675,7 @@ def execute_plan(config, report, confirmation, tfvars):
     if confirmation!=required:
         raise LifecycleError('Explicit confirmation required: '+required)
     var=checked_inputs(tfvars)
-    if sha256_file(var)!=info['tfvars_sha256']:
+    if sha256_approved_file(var)!=info['tfvars_sha256']:
         raise LifecycleError('Terraform inputs changed since plan')
     raw_plan = Path(info.get('plan', ''))
     if raw_plan.is_symlink():

@@ -51,3 +51,70 @@ def test_no_aws_calls_in_policy():
     with patch.object(r,'call') as mocked:
         n.assert_plan_policy({'resource_changes':[resource('module.rds.aws_db_instance.this',['create'])]},[],action='create')
         mocked.assert_not_called()
+
+
+def test_rebuild_execute_accepts_checked_private_tfvars_outside_repo(tmp_path, monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+    import lifecycle as n
+
+    private = tmp_path / "historical"
+    private.mkdir()
+    tfvars = private / "approved.tfvars.json"
+    tfvars.write_text("{}")
+    tfvars.chmod(0o600)
+    saved = tmp_path / "terraform.tfplan"
+    saved.write_bytes(b"synthetic-saved-plan")
+    report = tmp_path / "plan.json"
+    report.write_text(json.dumps({
+        "kind": "rebuild", "account": "275544662748",
+        "region": "eu-west-1", "cluster": "lab",
+        "tfvars_sha256": hashlib.sha256(tfvars.read_bytes()).hexdigest(),
+        "plan": str(saved),
+        "plan_sha256": hashlib.sha256(saved.read_bytes()).hexdigest(),
+        "state_lineage": "fixed-lineage", "state_serial": 60,
+        "targets": [],
+    }))
+    config = SimpleNamespace(
+        expected_account_id="275544662748", aws_region="eu-west-1",
+        cluster_name="lab",
+    )
+    monkeypatch.setattr(n, "BASE", tmp_path)
+    monkeypatch.setattr(n, "account_guard", lambda c: None)
+    monkeypatch.setattr(n, "environment", lambda c: {})
+    monkeypatch.setattr(n, "plan_json", lambda c, p: {
+        "resource_changes": [{"address": "module.eks.aws_eks_cluster.this",
+                              "mode": "managed", "change": {"actions": ["create"]}}],
+    })
+    calls = []
+    def fake_call(argv, **kwargs):
+        calls.append(list(map(str, argv)))
+        if "pull" in argv:
+            return json.dumps({"lineage": "fixed-lineage", "serial": 60}).encode()
+        return b""
+    monkeypatch.setattr(n, "call", fake_call)
+    n.execute_plan(config, report, "REBUILD-275544662748", tfvars)
+    assert len([c for c in calls if "apply" in c]) == 1
+
+def test_rebuild_execute_rejects_changed_tfvars_before_apply(tmp_path, monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+    import lifecycle as n
+    tfvars = tmp_path / "approved.tfvars.json"
+    tfvars.write_text("{}")
+    tfvars.chmod(0o600)
+    report = tmp_path / "plan.json"
+    report.write_text(json.dumps({
+        "kind": "rebuild", "account": "275544662748",
+        "region": "eu-west-1", "cluster": "lab",
+        "tfvars_sha256": hashlib.sha256(b'{"changed":true}').hexdigest(),
+    }))
+    config = SimpleNamespace(expected_account_id="275544662748",
+                             aws_region="eu-west-1", cluster_name="lab")
+    monkeypatch.setattr(n, "BASE", tmp_path)
+    monkeypatch.setattr(n, "account_guard", lambda c: None)
+    calls = []
+    monkeypatch.setattr(n, "call", lambda *a, **kw: calls.append(a))
+    with pytest.raises(LifecycleError, match="Terraform inputs changed"):
+        n.execute_plan(config, report, "REBUILD-275544662748", tfvars)
+    assert not calls
