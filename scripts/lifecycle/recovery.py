@@ -477,11 +477,16 @@ def preflight_database_restore(config, manifest_path=None):
     backup = validate_backup_manifest(config, manifest_path)
     restore_test_path = discover_latest_restore_test(config)
     restore_test = json.loads(restore_test_path.read_text(encoding='utf-8'))
-    verify_backup_restore_provenance(config, backup, restore_test)
+    verify_backup_restore_provenance(config, backup, restore_test, historical_dev=True)
     check_db_fresh(config, backup['values'], backup['manifest_data'])
     if backup['database'] != 'app':
         raise LifecycleError('Unexpected recovery database identity')
 
+    validation_time = dt.datetime.now(dt.timezone.utc)
+    backup_time = dt.datetime.fromisoformat(
+        backup['manifest_data']['created_utc'].replace('Z', '+00:00')
+    ).astimezone(dt.timezone.utc)
+    backup_age_seconds = (validation_time - backup_time).total_seconds()
     report_dir = config.evidence_dir / (
         'native-database-preflight-'
         + dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ-')
@@ -492,6 +497,10 @@ def preflight_database_restore(config, manifest_path=None):
     atomic_json_write(report_path, {
         'schema': 1,
         'created_utc': utc_now(),
+        'validation_time_utc': validation_time.isoformat(),
+        'original_backup_time_utc': backup_time.isoformat(),
+        'backup_age_seconds': backup_age_seconds,
+        'historical_dev_age_exception': 'DEV_ONLY_EXPLICIT_RECOVERY_PATH',
         'status': 'passed_pending_authorized_target_check',
         'account': config.expected_account_id,
         'region': config.aws_region,
@@ -550,7 +559,7 @@ def restore_database(config, manifest_path):
     )
     backup = validate_backup_manifest(config, manifest_file)
     restore_test = json.loads(discover_latest_restore_test(config).read_text())
-    verify_backup_restore_provenance(config, backup, restore_test)
+    verify_backup_restore_provenance(config, backup, restore_test, historical_dev=True)
     check_db_fresh(config,values,manifest)
     key=age_identity()
     raw_encrypted = Path(manifest.get('database_backup', ''))

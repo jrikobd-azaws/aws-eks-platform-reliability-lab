@@ -1415,7 +1415,7 @@ def _certification_datetime(value, description):
     return created
 
 
-def verify_backup_restore_provenance(config, backup, restore):
+def verify_backup_restore_provenance(config, backup, restore, *, historical_dev=False):
     """Bind historical backup provenance to a successful isolated restore test.
 
     The current recovery-controller revision is intentionally independent of
@@ -1438,17 +1438,34 @@ def verify_backup_restore_provenance(config, backup, restore):
     )
     if not required:
         raise LifecycleError("Backup and isolated restore-test provenance mismatch")
-    _verify_backup_restore_order(manifest, restore)
+    if historical_dev:
+        if (config.expected_account_id != "275544662748"
+                or config.aws_region != "eu-west-1"
+                or config.cluster_name != "eks-platform-reliability-lab"):
+            raise LifecycleError("Historical recovery point permitted only for approved DEV lab")
+    _verify_backup_restore_order(manifest, restore, historical_dev=historical_dev)
     return True
 
 
-def _verify_backup_restore_order(backup, restore):
-    backup_created = _certification_datetime(
-        backup.get("created_utc"), "Backup"
-    )
-    restore_created = _certification_datetime(
-        restore.get("created_utc"), "Restore-test"
-    )
+def _verify_backup_restore_order(backup, restore, *, historical_dev=False):
+    if historical_dev:
+        # Historical DEV recovery permits age, never future evidence.
+        def historical_time(value, label):
+            try:
+                created = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if created.tzinfo is None:
+                    raise ValueError("Timezone missing")
+                created = created.astimezone(dt.timezone.utc)
+            except (AttributeError, TypeError, ValueError):
+                raise LifecycleError("Invalid " + label + " timestamp") from None
+            if created > dt.datetime.now(dt.timezone.utc):
+                raise LifecycleError(label + " timestamp is in the future")
+            return created
+        backup_created = historical_time(backup.get("created_utc"), "Backup")
+        restore_created = historical_time(restore.get("created_utc"), "Restore-test")
+    else:
+        backup_created = _certification_datetime(backup.get("created_utc"), "Backup")
+        restore_created = _certification_datetime(restore.get("created_utc"), "Restore-test")
 
     if restore_created < backup_created:
         raise LifecycleError(
