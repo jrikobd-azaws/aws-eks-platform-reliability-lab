@@ -348,6 +348,48 @@ def check_db_fresh(config,values,manifest):
     if created<=checkpoint or raw['DBInstanceStatus']!='available' or raw['Endpoint']['Address']!=values['rds_address']:
         raise LifecycleError('Database is not a newly recreated available RDS instance')
 
+RDS_CA_CONTAINER_PATH = '/etc/ssl/rds/global-bundle.pem'
+
+
+def _verified_pg_env(password_variable):
+    """Fail closed unless the mounted CA and libpq TLS settings are usable."""
+    if password_variable not in ('MASTER_PASSWORD', 'APP_PASSWORD'):
+        raise LifecycleError('Unexpected PostgreSQL credential variable')
+    return (
+        'test -r "$PGSSLROOTCERT" && test -s "$PGSSLROOTCERT" || exit 78; '
+        'export PGPASSWORD="${' + password_variable + '}"; '
+        'export PGSSLMODE=verify-full; '
+    )
+
+
+RDS_CA_OFFICIAL_URL = 'https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem'
+
+
+def _rds_ca_bundle():
+    """Fetch RDS trust directly from Amazon over authenticated HTTPS.
+
+    Fail closed: redirect targets and unauthenticated local PEMs are refused.
+    """
+    import ssl
+    import urllib.request
+    try:
+        request = urllib.request.Request(RDS_CA_OFFICIAL_URL, headers={'User-Agent': 'lb2-rds-trust/1'})
+        with urllib.request.urlopen(request, timeout=20, context=ssl.create_default_context()) as response:
+            if response.geturl() != RDS_CA_OFFICIAL_URL or response.status != 200:
+                raise LifecycleError('RDS CA trust source did not match official AWS URL')
+            content = response.read(131073)
+        if len(content) > 131072 or content.count(b'-----BEGIN CERTIFICATE-----') < 3:
+            raise LifecycleError('RDS CA trust bundle size or certificate count invalid')
+        import tempfile
+        with tempfile.NamedTemporaryFile() as tmp:
+            tmp.write(content)
+            tmp.flush()
+            ssl.create_default_context(cafile=tmp.name)
+        return content
+    except (OSError, ssl.SSLError, ValueError) as exc:
+        raise LifecycleError('Official AWS RDS CA retrieval or validation failed') from exc
+
+
 EXPECTED_ALEMBIC_REVISION = 'fe56fa70289e'
 EMPTY_TARGET_QUERY = (
     "SELECT COUNT(*) FROM pg_class c JOIN pg_namespace n "
@@ -426,7 +468,7 @@ def _database_acceptance_query():
 def _validate_restored_database(exec_pg):
     query = _database_acceptance_query()
     script = (
-        'export PGPASSWORD="$APP_PASSWORD" PGSSLMODE=require; '
+        _verified_pg_env('APP_PASSWORD') +
         'exec psql -X -At -v ON_ERROR_STOP=1 -h "$1" '
         '-U app_runtime -d "$3" -c ' + __import__('shlex').quote(query)
     )
@@ -578,6 +620,7 @@ def restore_database(config, manifest_path):
         raise LifecycleError('Encrypted backup checksum mismatch')
     archive=call(['age','-d','-i',str(key),str(encrypted)])
     call(['pg_restore','--list'],data=archive)
+    ca_bundle = _rds_ca_bundle()
     master=master_credentials(config,values)
     # Retrieve existing application credentials without printing values.
     app=json.loads(call(['aws','secretsmanager','get-secret-value','--secret-id',config.cluster_name+'/dev/app-runtime',
@@ -588,6 +631,7 @@ def restore_database(config, manifest_path):
         # Credentials are supplied as environment variables from a short-lived
         # Kubernetes Secret; binary pg_restore stdin contains only the archive.
         suffix=secrets.token_hex(5)
+        ca_name='native-pg-rds-ca-'+suffix
         secret_name='native-pg-credentials-'+suffix
         pod_name='native-pg-restore-'+suffix
         secret={'apiVersion':'v1','kind':'Secret','metadata':{'name':secret_name,'namespace':'dev'},'type':'Opaque',
@@ -626,22 +670,29 @@ def restore_database(config, manifest_path):
         checkpoint.update('database', 'running', detail='Native database restore authorized')
         atomic_json_write(report_path, report)
         failure = None
+        ca_creation_attempted = False
         try:
+            ca_spec = {'apiVersion':'v1','kind':'ConfigMap', 'metadata':{'name':ca_name,'namespace':'dev'},
+                       'data':{'global-bundle.pem':ca_bundle.decode('ascii')}}
+            ca_creation_attempted = True
+            call(['kubectl','-n','dev','create','-f','-'],data=json.dumps(ca_spec).encode(),env=environment(config))
             call(['kubectl','-n','dev','create','-f','-'],data=json.dumps(secret).encode(),env=environment(config))
             spec=client_pod(config,pod_name)
-            spec['spec']['containers'][0]['env']=[
+            spec['spec'].setdefault('volumes', []).append({'name':'rds-ca','configMap':{'name':ca_name,'defaultMode':292}})
+            spec['spec']['containers'][0].setdefault('volumeMounts', []).append({'name':'rds-ca','mountPath':'/etc/ssl/rds','readOnly':True})
+            spec['spec']['containers'][0].setdefault('env', []).extend([{'name':'PGSSLROOTCERT','value':RDS_CA_CONTAINER_PATH}] + [
                 {'name':k,'valueFrom':{'secretKeyRef':{'name':secret_name,'key':k}}}
-                for k in ('MASTER_PASSWORD','APP_PASSWORD')]
+                for k in ('MASTER_PASSWORD','APP_PASSWORD')])
             call(['kubectl','-n','dev','create','-f','-'],data=json.dumps(spec).encode(),env=environment(config))
             call(['kubectl','-n','dev','wait','--for=condition=Ready','pod/'+pod_name,'--timeout=180s'],env=environment(config),timeout=220)
             def exec_pg(script, data=None, timeout=180):
                 return call(['kubectl','-n','dev','exec','-i',pod_name,'--','sh','-c',script,'restore',host,master['username'],db],
                     data=data,env=environment(config),timeout=timeout)
             # No database mutation until empty-target check succeeds.
-            script='export PGPASSWORD="$MASTER_PASSWORD" PGSSLMODE=require; exec psql -X -At -v ON_ERROR_STOP=1 -h "$1" -U "$2" -d "$3" -c '+__import__('shlex').quote(EMPTY_TARGET_QUERY)
+            script=_verified_pg_env('MASTER_PASSWORD')+'exec psql -X -At -v ON_ERROR_STOP=1 -h "$1" -U "$2" -d "$3" -c '+__import__('shlex').quote(EMPTY_TARGET_QUERY)
             if exec_pg(script).decode().strip()!='0':
                 raise LifecycleError('Target database is not empty; refusing non-idempotent restore')
-            restore_script='export PGPASSWORD="$MASTER_PASSWORD" PGSSLMODE=require; exec pg_restore --exit-on-error --no-owner --no-acl -h "$1" -U "$2" -d "$3"'
+            restore_script=_verified_pg_env('MASTER_PASSWORD')+'exec pg_restore --exit-on-error --no-owner --no-acl -h "$1" -U "$2" -d "$3"'
             report['restore_attempted'] = True
             atomic_json_write(report_path, report)
             exec_pg(restore_script,data=archive,timeout=1800)
@@ -650,13 +701,14 @@ def restore_database(config, manifest_path):
             # psql variable interpolation safely quotes password as a SQL literal.
             # Role creation is idempotent; database schema must have been empty.
             sql=("DO $role$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='app_runtime') THEN CREATE ROLE app_runtime LOGIN; END IF; END $role$;\n"
+                "\\getenv pwd APP_PASSWORD\n"
                 "ALTER ROLE app_runtime LOGIN PASSWORD :'pwd';\n"
                 'GRANT CONNECT ON DATABASE "'+db+'" TO app_runtime;\n'
                 'REVOKE CREATE ON SCHEMA public FROM PUBLIC;\n'
                 'GRANT USAGE ON SCHEMA public TO app_runtime;\n'
                 'GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO app_runtime;\n'
                 'GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO app_runtime;\n')
-            role_script='export PGPASSWORD="$MASTER_PASSWORD" PGSSLMODE=require; exec psql -X -v ON_ERROR_STOP=1 -v "pwd=$APP_PASSWORD" -h "$1" -U "$2" -d "$3"'
+            role_script=_verified_pg_env('MASTER_PASSWORD')+'exec psql -X -v ON_ERROR_STOP=1 -h "$1" -U "$2" -d "$3"'
             exec_pg(role_script,data=sql.encode())
             _validate_restored_database(exec_pg)
             report['restore_succeeded'] = True
@@ -667,6 +719,13 @@ def restore_database(config, manifest_path):
             report['failure_type'] = type(exc).__name__
         finally:
             cleanup = _cleanup_restore_resources(config, pod_name, secret_name)
+            if ca_creation_attempted:
+                try:
+                    call(['kubectl','-n','dev','delete','configmap',ca_name,'--ignore-not-found=true','--wait=true','--timeout=120s'],env=environment(config),timeout=150)
+                    if output(['kubectl','-n','dev','get','configmap',ca_name,'--ignore-not-found','-o','name'],env=environment(config)):
+                        cleanup = False
+                except (LifecycleError, OSError):
+                    cleanup = False
             report['temporary_resources_cleanup_verified'] = cleanup
             restore_category, cleanup_category = _restore_failure_categories(
                 failure,
