@@ -377,8 +377,8 @@ def _rds_ca_bundle():
         with urllib.request.urlopen(request, timeout=20, context=ssl.create_default_context()) as response:
             if response.geturl() != RDS_CA_OFFICIAL_URL or response.status != 200:
                 raise LifecycleError('RDS CA trust source did not match official AWS URL')
-            content = response.read(131073)
-        if len(content) > 131072 or content.count(b'-----BEGIN CERTIFICATE-----') < 3:
+            content = response.read(1048577)
+        if len(content) > 1048576 or content.count(b'-----BEGIN CERTIFICATE-----') < 3:
             raise LifecycleError('RDS CA trust bundle size or certificate count invalid')
         import tempfile
         with tempfile.NamedTemporaryFile() as tmp:
