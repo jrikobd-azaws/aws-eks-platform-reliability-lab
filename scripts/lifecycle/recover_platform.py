@@ -10,6 +10,7 @@ import yaml
 
 import getpass
 import json
+import os
 import re
 import secrets
 import shutil
@@ -182,6 +183,18 @@ class PlatformRecovery:
     checkpoint: CheckpointStore
     executor: Executor = call
     bootstrap: RecoveryBootstrap | None = None
+    argocd_server: str | None = None
+
+    def _argocd_server_arg(self) -> list[str]:
+        """Build the --server argument from the verified session or env override."""
+        server = self.argocd_server or os.getenv("LAB_ARGOCD_SERVER", "").strip()
+        if not server:
+            raise LifecycleError(
+                "Argo CD CLI --server is required: no verified session established. "
+                "Run platform recovery through the bootstrap argocd_session() context "
+                "manager or set LAB_ARGOCD_SERVER explicitly."
+            )
+        return ["--server", server]
 
     def run(self, args, *, data: bytes | None = None, timeout: int = 1200) -> bytes:
         return self.executor(
@@ -279,7 +292,8 @@ class PlatformRecovery:
         )
 
         cli = self.json([
-            "argocd", "app", "get", name, "-o", "json",
+            "argocd", *self._argocd_server_arg(),
+            "app", "get", name, "-o", "json",
         ])
 
         cli_meta = cli.get("metadata", {})
@@ -322,7 +336,8 @@ class PlatformRecovery:
         )
 
         self.run(
-            ["argocd", "app", "sync", name, *options],
+            ["argocd", *self._argocd_server_arg(),
+             "app", "sync", name, *options],
             timeout=timeout,
         )
 
@@ -584,7 +599,8 @@ class PlatformRecovery:
                     "aws-load-balancer-controller", timeout=960,
                 )
                 self.run([
-                    "argocd", "app", "wait",
+                    "argocd", *self._argocd_server_arg(),
+                    "app", "wait",
                     "aws-load-balancer-controller",
                     "--sync", "--health", "--timeout", "900",
                 ], timeout=960)
@@ -600,7 +616,8 @@ class PlatformRecovery:
             ):
                 self._sync_application(name, timeout=int(timeout) + 60)
                 self.run([
-                    "argocd", "app", "wait", name, "--sync", "--health",
+                    "argocd", *self._argocd_server_arg(),
+                    "app", "wait", name, "--sync", "--health",
                     "--timeout", timeout,
                 ], timeout=int(timeout) + 60)
 
@@ -624,7 +641,8 @@ class PlatformRecovery:
     def restore_observability_crds(self) -> None:
         self._sync_application("observability-crds", timeout=1200)
         self.run([
-            "argocd", "app", "wait", "observability-crds", "--sync", "--health",
+            "argocd", *self._argocd_server_arg(),
+            "app", "wait", "observability-crds", "--sync", "--health",
             "--timeout", "900",
         ], timeout=960)
         for name in OBSERVABILITY_CRDS:
@@ -746,7 +764,8 @@ class PlatformRecovery:
     def restore_observability(self) -> None:
         self._sync_application("observability", timeout=1800)
         self.run([
-            "argocd", "app", "wait", "observability", "--sync", "--health",
+            "argocd", *self._argocd_server_arg(),
+            "app", "wait", "observability", "--sync", "--health",
             "--timeout", "1200",
         ], timeout=1260)
 
@@ -790,7 +809,8 @@ class PlatformRecovery:
             "stage3-dev", "--revision", STAGE3_REVISION, timeout=1200,
         )
         self.run([
-            "argocd", "app", "wait", "stage3-dev", "--sync", "--health",
+            "argocd", *self._argocd_server_arg(),
+            "app", "wait", "stage3-dev", "--sync", "--health",
             "--timeout", "900",
         ], timeout=960)
 
@@ -851,9 +871,13 @@ class PlatformRecovery:
         )
         self.run_stage(*actions[0])
         if self.bootstrap:
-            with self.bootstrap.argocd_session():
-                for name, ready, action in actions[1:]:
-                    self.run_stage(name, ready, action)
+            with self.bootstrap.argocd_session() as verified_server:
+                self.argocd_server = verified_server
+                try:
+                    for name, ready, action in actions[1:]:
+                        self.run_stage(name, ready, action)
+                finally:
+                    self.argocd_server = None
         else:
             for name, ready, action in actions[1:]:
                 self.run_stage(name, ready, action)
@@ -1031,7 +1055,13 @@ def validate_recovered_application(config: LabConfig) -> bool:
     return result.strip() == "PASS"
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if any(arg in ("-h", "--help") for arg in args):
+        print("Usage: recover_platform.py [-h|--help]")
+        print("Runs the native Stage 2 platform recovery (mutating).")
+        print("--help is non-mutating: it prints this usage and exits without recovery.")
+        return
     config = LabConfig.from_environment()
     bootstrap = RecoveryBootstrap(config)
     manager = PlatformRecovery(
@@ -1048,9 +1078,18 @@ def main() -> None:
 
 
 def sanitized_failure(exc: Exception) -> str:
-    """Return actionable diagnostics without emitting arbitrary exception data."""
+    """Return actionable structured diagnostics without emitting arbitrary exception data.
+
+    Every failure identifies: lifecycle stage, failure category, exit code
+    (when available), safe corrective action, and whether retry is safe.
+    """
     if not isinstance(exc, LifecycleError):
-        return f"BLOCKED: {type(exc).__name__}"
+        return (
+            f"BLOCKED: {type(exc).__name__}. "
+            "Operation stopped; review sanitized diagnostic evidence. "
+            "Retry: requires investigation."
+        )
+
     detail = " ".join(str(exc).split())
     detail = re.sub(
         r"(?i)\b(password|token|authorization|connection[-_ ]?string)\b"
@@ -1059,7 +1098,55 @@ def sanitized_failure(exc: Exception) -> str:
         detail,
     )
     detail = re.sub(r"(?i)postgres(?:ql)?://\S+", "[REDACTED_DSN]", detail)
-    return f"BLOCKED: LifecycleError: {detail[:400]}"
+
+    # Classify the failure category and corrective action.
+    lower = detail.lower()
+    if "argocd_server_selection" in lower or "exit=20" in lower:
+        category = "ARGOCD_SERVER_SELECTION"
+        action = (
+            "Ensure --server is propagated from the verified localhost "
+            "argocd_session(). Restart platform recovery through the "
+            "bootstrap context manager, not standalone."
+        )
+        retry = "safe after session re-establishment"
+    elif "identity" in lower or "mismatch" in lower:
+        category = "IDENTITY_MISMATCH"
+        action = "Verify AWS account, EKS cluster, and Terraform state identity."
+        retry = "unsafe; requires approval"
+    elif "destination" in lower:
+        category = "DESTINATION_MISMATCH"
+        action = "Verify Argo CD Application destination is in-cluster."
+        retry = "safe after correction"
+    elif "manual" in lower and "sync" in lower:
+        category = "SYNC_POLICY_VIOLATION"
+        action = "Verify Application syncPolicy has automated.enabled=false."
+        retry = "safe after correction"
+    elif "prune" in lower or "force" in lower or "unsafe" in lower and "sync" in lower:
+        category = "UNSAFE_SYNC_OPTION"
+        action = "Remove --prune or --force from sync options."
+        retry = "safe after correction"
+    elif "empty" in lower and "database" in lower:
+        category = "NON_EMPTY_TARGET"
+        action = "Investigate partially restored database before proceeding."
+        retry = "unsafe; requires approval"
+    elif "ambiguous" in lower or "ownership" in lower:
+        category = "FAIL_CLOSED"
+        action = "Manual review of resource ownership required."
+        retry = "unsafe; requires approval"
+    elif "timeout" in lower:
+        category = "TIMEOUT"
+        action = "Check resource health and retry the operation."
+        retry = "safe after resource health confirmation"
+    else:
+        category = "UNCLASSIFIED"
+        action = "Review sanitized diagnostic evidence."
+        retry = "requires investigation"
+
+    return (
+        f"BLOCKED: LifecycleError [{category}]: {detail[:400]}\n"
+        f"  Corrective action: {action}\n"
+        f"  Retry: {retry}"
+    )
 
 
 if __name__ == "__main__":

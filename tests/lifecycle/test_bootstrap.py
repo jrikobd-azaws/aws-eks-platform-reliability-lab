@@ -311,6 +311,7 @@ def test_argocd_service_port_is_discovered(tmp_path, monkeypatch):
         "spec": {"ports": [{"name": "https", "port": 9443}]}
     })
     boot._verify_argocd_auth = Mock()
+    boot._argocd_login = Mock()
     with boot.argocd_session():
         pass
     assert "8443:9443" in popen.call_args.args[0]
@@ -514,3 +515,246 @@ def test_native_kubeconfig_rejects_unsafe_exec_args(tmp_path, bad_args):
 
     boot = RecoveryBootstrap(config(tmp_path), Mock())
     assert not boot._kubeconfig_matches(path, cluster)
+
+
+
+# --- Lifecycle Batch 2: verified_server propagation regression tests ---
+
+
+def test_verified_server_is_none_before_session(tmp_path):
+    """verified_server must be None until argocd_session() establishes it."""
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    assert boot.verified_server is None
+
+
+def test_verified_server_set_after_reused_session(tmp_path, monkeypatch):
+    """verified_server must be set when reusing an existing authenticated session."""
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    boot._argocd_cli = Path("/approved/argocd")
+    monkeypatch.setenv("LAB_ARGOCD_SERVER", "127.0.0.1:8443")
+    monkeypatch.setattr(boot, "_listening", lambda port: True)
+    boot.runner.run.side_effect = lambda *a, **kw: subprocess.CompletedProcess(
+        [], 0, "", ""
+    )
+    with boot.argocd_session() as server:
+        assert server == "127.0.0.1:8443"
+        assert boot.verified_server == "127.0.0.1:8443"
+
+
+def test_verified_server_set_after_new_tunnel(tmp_path, monkeypatch):
+    """verified_server must be set after establishing a new port-forward tunnel."""
+    process = Mock()
+    process.poll.return_value = None
+    process.wait.return_value = 0
+    popen = Mock(return_value=process)
+    boot = RecoveryBootstrap(
+        config(tmp_path), Mock(), popen_factory=popen
+    )
+    boot._argocd_cli = Path("/approved/argocd")
+    monkeypatch.setenv("LAB_ARGOCD_SERVER", "127.0.0.1:8443")
+    checks = iter([False, True])
+    monkeypatch.setattr(boot, "_listening", lambda port: next(checks))
+    monkeypatch.setattr(boot, "_json", lambda *a, **k: {
+        "spec": {"ports": [{"name": "https", "port": 9443}]}
+    })
+    boot._verify_argocd_auth = Mock()
+    boot._argocd_login = Mock()
+    with boot.argocd_session() as server:
+        assert server == "127.0.0.1:8443"
+        assert boot.verified_server == "127.0.0.1:8443"
+
+
+
+# --- Lifecycle Batch 2: Argo CD Application API authentication regression tests ---
+
+
+def test_expired_credentials_refresh_via_login(tmp_path, monkeypatch):
+    """When _verify_argocd_auth fails on a listening port, argocd_login must be called."""
+    from foundation import LifecycleError
+
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    boot._argocd_cli = Path("/approved/argocd")
+    monkeypatch.setenv("LAB_ARGOCD_SERVER", "127.0.0.1:8443")
+    monkeypatch.setattr(boot, "_listening", lambda port: True)
+
+    call_sequence = []
+
+    def fail_then_pass(cli, server):
+        call_sequence.append("verify")
+        if len(call_sequence) == 1:
+            raise LifecycleError("UNAUTHENTICATED")
+
+    boot._verify_argocd_auth = Mock(side_effect=fail_then_pass)
+    boot._argocd_login = Mock()
+
+    with boot.argocd_session() as server:
+        assert server == "127.0.0.1:8443"
+
+    assert call_sequence == ["verify", "verify"]
+    boot._argocd_login.assert_called_once()
+    assert boot.verified_server == "127.0.0.1:8443"
+
+
+def test_new_tunnel_reuses_valid_context(tmp_path, monkeypatch):
+    """A new tunnel on a different port must always perform argocd login."""
+    process = Mock()
+    process.poll.return_value = None
+    process.wait.return_value = 0
+    popen = Mock(return_value=process)
+    boot = RecoveryBootstrap(
+        config(tmp_path), Mock(), popen_factory=popen
+    )
+    boot._argocd_cli = Path("/approved/argocd")
+    monkeypatch.setenv("LAB_ARGOCD_SERVER", "127.0.0.1:8443")
+    checks = iter([False, True])
+    monkeypatch.setattr(boot, "_listening", lambda port: next(checks))
+    monkeypatch.setattr(boot, "_json", lambda *a, **k: {
+        "spec": {"ports": [{"name": "https", "port": 9443}]}
+    })
+    boot._verify_argocd_auth = Mock()
+    boot._argocd_login = Mock()
+
+    with boot.argocd_session() as server:
+        assert server == "127.0.0.1:8443"
+
+    boot._argocd_login.assert_not_called()
+    boot._verify_argocd_auth.assert_called_once()
+
+
+def test_login_failure_blocks_session(tmp_path, monkeypatch):
+    """If login fails, the session must not yield."""
+    from foundation import LifecycleError
+
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    boot._argocd_cli = Path("/approved/argocd")
+    monkeypatch.setenv("LAB_ARGOCD_SERVER", "127.0.0.1:8443")
+    monkeypatch.setattr(boot, "_listening", lambda port: True)
+    boot._verify_argocd_auth = Mock(side_effect=LifecycleError("UNAUTHENTICATED"))
+    boot._argocd_login = Mock(side_effect=LifecycleError("login failed"))
+
+    with pytest.raises(LifecycleError, match="login failed"):
+        with boot.argocd_session():
+            pass
+
+    assert boot.verified_server is None
+
+
+def test_app_list_rejected_triggers_login(tmp_path, monkeypatch):
+    """When account query passes but app list fails, login must be attempted."""
+    from foundation import LifecycleError
+
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    boot._argocd_cli = Path("/approved/argocd")
+    monkeypatch.setenv("LAB_ARGOCD_SERVER", "127.0.0.1:8443")
+    monkeypatch.setattr(boot, "_listening", lambda port: True)
+
+    verify_calls = []
+
+    def fail_app_list(cli, server):
+        verify_calls.append(len(verify_calls))
+        if len(verify_calls) == 1:
+            # Simulate: get-user-info passes, app list fails
+            raise LifecycleError("Command failed: argocd (exit=20; category=ARGOCD_AUTH)")
+
+    boot._verify_argocd_auth = Mock(side_effect=fail_app_list)
+    boot._argocd_login = Mock()
+
+    with boot.argocd_session() as server:
+        assert server == "127.0.0.1:8443"
+
+    boot._argocd_login.assert_called_once()
+    assert len(verify_calls) == 2
+
+
+def test_verify_argocd_auth_checks_app_list_not_just_user_info(tmp_path, monkeypatch):
+    """_verify_argocd_auth must call both get-user-info AND app list."""
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    boot._argocd_cli = Path("/approved/argocd")
+    cli = Path("/approved/argocd")
+    server = "127.0.0.1:8443"
+
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    boot.runner.run = Mock(side_effect=fake_run)
+    boot._verify_argocd_auth(cli, server)
+
+    assert len(calls) == 2
+    assert "get-user-info" in " ".join(str(a) for a in calls[0])
+    assert "app" in calls[1] and "list" in calls[1]
+    assert "--server" in calls[0]
+    assert "--server" in calls[1]
+
+
+def test_admin_password_retrieved_from_k8s_secret(tmp_path, monkeypatch):
+    """_argocd_admin_password must retrieve from argocd-initial-admin-secret."""
+    import base64
+
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    password_value = "test-admin-password-123"
+    encoded = base64.b64encode(password_value.encode()).decode()
+
+    def fake_capture(args, **kwargs):
+        if "jsonpath" in " ".join(str(a) for a in args) and "argocd-initial-admin-secret" in " ".join(str(a) for a in args):
+            return encoded
+        return ""
+
+    boot._capture = Mock(side_effect=fake_capture)
+    result = boot._argocd_admin_password()
+    assert result == password_value
+
+
+def test_missing_admin_secret_fails_closed(tmp_path, monkeypatch):
+    """Missing argocd-initial-admin-secret must fail closed."""
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    boot._capture = Mock(return_value="")
+    with pytest.raises(LifecycleError, match="initial admin secret is unavailable"):
+        boot._argocd_admin_password()
+
+
+def test_non_auth_error_never_triggers_admin_login(tmp_path, monkeypatch):
+    from foundation import LifecycleError
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    boot._argocd_cli = Path("/approved/argocd")
+    monkeypatch.setenv("LAB_ARGOCD_SERVER", "127.0.0.1:8443")
+    monkeypatch.setattr(boot, "_listening", lambda port: True)
+    boot._verify_argocd_auth = Mock(side_effect=LifecycleError("PERMISSION_DENIED"))
+    boot._argocd_login = Mock()
+    with pytest.raises(LifecycleError, match="PERMISSION_DENIED"):
+        with boot.argocd_session():
+            pass
+    boot._argocd_login.assert_not_called()
+
+
+def test_login_no_password_argv_or_insecure(tmp_path, monkeypatch):
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    boot._argocd_admin_password = Mock(return_value="synthetic-password")
+    observed = []
+    def fake_run(argv, **kw):
+        observed.append((argv, kw))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    boot._argocd_login(Path("/approved/argocd"), "127.0.0.1:8443")
+    argv, kw = observed[0]
+    assert "--password-stdin" in argv
+    assert "--insecure" not in argv
+    assert "--password" not in argv
+    assert "synthetic-password" not in " ".join(argv)
+    assert kw["input"] == "synthetic-password"
+
+
+def test_unsupported_stdin_fails_without_fallback(tmp_path, monkeypatch):
+    from foundation import LifecycleError
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    boot._argocd_admin_password = Mock(return_value="synthetic-password")
+    calls = []
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, "", "unknown flag: --password-stdin")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(LifecycleError, match="lacks secure password-stdin"):
+        boot._argocd_login(Path("/approved/argocd"), "127.0.0.1:8443")
+    assert len(calls) == 1

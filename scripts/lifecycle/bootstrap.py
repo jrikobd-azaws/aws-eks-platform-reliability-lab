@@ -90,6 +90,7 @@ class RecoveryBootstrap:
         self.sleep = sleep
         self._owned_tunnel: subprocess.Popen | None = None
         self._argocd_cli: Path | None = None
+        self.verified_server: str | None = None
 
     def _capture(self, args, *, timeout=120, env=None) -> str:
         return self.runner.run(args, timeout=timeout, env=env).stdout.strip()
@@ -596,14 +597,74 @@ class RecoveryBootstrap:
         except OSError:
             return False
 
+    def _argocd_admin_password(self) -> str:
+        """Retrieve the Argo CD initial admin password from the approved secret.
+
+        This is the standard Argo CD credential source (Kubernetes secret
+        ``argocd-initial-admin-secret``), not a password reset.  The value
+        is never logged or returned to callers.
+        """
+        raw = self._capture([
+            "kubectl", "-n", "argocd", "get", "secret",
+            "argocd-initial-admin-secret",
+            "-o", "jsonpath={.data.password}",
+        ], timeout=30, env=self.config.environment())
+        if not raw:
+            raise LifecycleError("Argo CD initial admin secret is unavailable")
+        password = base64.b64decode(raw).decode()
+        if not password:
+            raise LifecycleError("Argo CD initial admin password is empty")
+        return password
+
+    @staticmethod
+    def _argocd_auth_failure(exc: LifecycleError) -> bool:
+        """Only explicit authentication rejection permits a credential refresh."""
+        detail = str(exc).upper()
+        return "UNAUTHENTICATED" in detail or "CATEGORY=ARGOCD_AUTH" in detail
+
+    def _argocd_login(self, cli: Path, server: str) -> None:
+        """Use the approved secret through stdin; never place passwords in argv."""
+        password = self._argocd_admin_password()
+        try:
+            result = subprocess.run(
+                [str(cli), "login", server, "--username", "admin",
+                 "--password-stdin"],
+                input=password, capture_output=True, text=True, timeout=30,
+                env=self.config.environment(),
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or "").lower()
+                if "unknown flag" in detail or "password-stdin" in detail:
+                    raise LifecycleError(
+                        "ARGOCD_AUTHENTICATION_FAILED: CLI lacks secure password-stdin; "
+                        "operator must configure an approved authenticated CLI context"
+                    )
+                raise LifecycleError(
+                    "ARGOCD_AUTHENTICATION_FAILED: approved initial credential rejected; "
+                    "operator must verify existing credential and server identity"
+                )
+        except subprocess.TimeoutExpired:
+            raise LifecycleError("ARGOCD_AUTHENTICATION_FAILED: login timed out") from None
+        finally:
+            del password
+
     def _verify_argocd_auth(self, cli: Path, server: str) -> None:
+        """Verify Application API access, not just account queries.
+
+        ``argocd account get-user-info`` can return exit 0 with an
+        expired or server-mismatched token, but ``argocd app list``
+        requires a valid token for the exact server address.
+        """
         self.runner.run([
             cli, "account", "get-user-info", "--server", server,
+        ], timeout=30)
+        self.runner.run([
+            cli, "app", "list", "--server", server,
         ], timeout=30)
 
     @contextlib.contextmanager
     def argocd_session(self) -> Iterator[str]:
-        """Reuse authenticated localhost state and own only a new tunnel."""
+        """Reuse verified localhost context; refresh only on explicit auth rejection."""
         cli = self._argocd_cli or self._argocd_tool()
         server = self._argocd_server(cli)
         port = int(server.rsplit(":", 1)[1])
@@ -611,8 +672,21 @@ class RecoveryBootstrap:
         os.environ["PATH"] = str(cli.parent) + os.pathsep + (previous_path or "")
         try:
             if self._listening(port):
-                self._verify_argocd_auth(cli, server)
-                print("PASS: reused authenticated localhost Argo CD session", flush=True)
+                try:
+                    self._verify_argocd_auth(cli, server)
+                    print("PASS: reused authenticated localhost Argo CD session", flush=True)
+                except LifecycleError as exc:
+                    if not self._argocd_auth_failure(exc):
+                        raise
+                    print(
+                        f"{self.action_class('argocd_local_tunnel').value}: "
+                        "refreshing Argo CD credentials for current server",
+                        flush=True,
+                    )
+                    self._argocd_login(cli, server)
+                    self._verify_argocd_auth(cli, server)
+                    print("PASS: Argo CD credentials refreshed and Application API verified", flush=True)
+                self.verified_server = server
                 yield server
                 return
 
@@ -644,7 +718,15 @@ class RecoveryBootstrap:
                     self.sleep(0.25)
                 else:
                     raise LifecycleError("Argo CD port-forward did not become ready")
-                self._verify_argocd_auth(cli, server)
+                # Try existing approved CLI context before any credential refresh.
+                try:
+                    self._verify_argocd_auth(cli, server)
+                except LifecycleError as exc:
+                    if not self._argocd_auth_failure(exc):
+                        raise
+                    self._argocd_login(cli, server)
+                    self._verify_argocd_auth(cli, server)
+                self.verified_server = server
                 yield server
             finally:
                 if self._owned_tunnel is process and process.poll() is None:

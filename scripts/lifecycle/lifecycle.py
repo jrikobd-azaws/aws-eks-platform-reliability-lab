@@ -549,6 +549,15 @@ def validate_command_argv(argv):
     return validated
 
 
+def _classify_subprocess_error(exc):
+    """Classify subprocess failures into actionable categories."""
+    if exc.returncode == 20 and str(exc.cmd[0]).endswith("argocd"):
+        return "ARGOCD_SERVER_SELECTION"
+    if exc.returncode in (1, 20):
+        return "ARGOCD_SERVER_SELECTION" if str(exc.cmd[0]).endswith("argocd") else "UNCLASSIFIED"
+    return "UNCLASSIFIED"
+
+
 def call(argv, *, data=None, timeout=1200, env=None):
     """Binary-safe subprocess call; never display stderr, which may contain secrets."""
     checked_argv = validate_command_argv(argv)
@@ -562,9 +571,10 @@ def call(argv, *, data=None, timeout=1200, env=None):
             '(private stderr suppressed)'
         ) from None
     except subprocess.CalledProcessError as exc:
+        category = _classify_subprocess_error(exc)
         raise LifecycleError(
             f'Command failed: {argv[0]} (exit={exc.returncode}; '
-            'private stderr suppressed)'
+            f'category={category}; private stderr suppressed)'
         ) from None
 
 def output(argv, **kwargs):
