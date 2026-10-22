@@ -584,11 +584,34 @@ def main():
         legacy(args.command)
 
 
-def blocked_error_message(exc):
-    """Fail closed without exposing arbitrary exception content."""
+def _sanitized_lifecycle_detail(exc):
+    """Return bounded diagnostics only for controlled lifecycle failures."""
+    from foundation import LifecycleError, redact
+
+    if not isinstance(exc, LifecycleError):
+        return None
+    detail = redact(str(exc)).replace("\r", " ").replace("\n", " ")[:500]
+    cause = exc.__cause__
+    if isinstance(cause, LifecycleError):
+        cause_detail = redact(str(cause)).replace("\r", " ").replace("\n", " ")[:500]
+        if cause_detail and cause_detail != detail:
+            detail += "; cause=" + cause_detail
+    return detail or "controlled lifecycle failure without detail"
+
+
+def blocked_error_message(exc, operation=None):
+    """Fail closed while exposing only sanitized controlled diagnostics."""
+    stage = (
+        "native-database-restore"
+        if operation == "native-database-restore"
+        else "lifecycle"
+    )
+    detail = _sanitized_lifecycle_detail(exc)
+    if detail is None:
+        detail = "unexpected failure; exception detail suppressed"
     return (
-        f"BLOCKED: {type(exc).__name__}. "
-        "Operation stopped; review sanitized diagnostic evidence."
+        f"BLOCKED: stage={stage}; category={type(exc).__name__}; "
+        f"detail={detail}. Review private diagnostic evidence before retry."
     )
 
 
@@ -604,7 +627,14 @@ if __name__ == "__main__":
         ValueError,
     ) as exc:
         print(
-            blocked_error_message(exc),
+            blocked_error_message(
+                exc,
+                operation=(
+                    "native-database-restore"
+                    if "native-database-restore" in sys.argv[1:]
+                    else None
+                ),
+            ),
             file=sys.stderr,
         )
         sys.exit(1)
