@@ -885,6 +885,7 @@ def validate_backup_manifest(config, manifest_path=None, *, historical_dev=False
         or data.get("database") != database
         or data.get("rds_endpoint") != host
         or not re.fullmatch(r"[0-9a-f]{40}", str(data.get("source_revision", "")))
+        or (not historical_dev and data["source_revision"] != source_revision)
     ):
         raise LifecycleError("Backup identity does not match the current environment and source")
     # Historical secret identity is immutable backup provenance. The current

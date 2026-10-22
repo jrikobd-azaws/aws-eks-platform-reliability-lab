@@ -157,7 +157,7 @@ def test_historical_backup_provenance_rejects_mismatch(monkeypatch, changed):
         "account": "275544662748", "cluster": "lab", "database": "app",
     }
     restore.update(changed)
-    monkeypatch.setattr("lifecycle._verify_backup_restore_order", lambda *a: True)
+    monkeypatch.setattr("lifecycle._verify_backup_restore_order", lambda *a, **kw: True)
     with pytest.raises(LifecycleError, match="provenance mismatch"):
         verify_backup_restore_provenance(config, backup, restore)
 
@@ -180,5 +180,5 @@ def test_historical_backup_provenance_accepts_distinct_controller_revision(monke
         "source_revision": "a" * 40, "database_sha256": "checksum",
         "account": "275544662748", "cluster": "lab", "database": "app",
     }
-    monkeypatch.setattr("lifecycle._verify_backup_restore_order", lambda *a: True)
+    monkeypatch.setattr("lifecycle._verify_backup_restore_order", lambda *a, **kw: True)
     assert verify_backup_restore_provenance(config, backup, restore)
