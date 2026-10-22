@@ -858,7 +858,15 @@ def sha256_approved_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def validate_backup_manifest(config, manifest_path=None):
+def validate_backup_manifest(config, manifest_path=None, *, historical_dev=False):
+    if historical_dev and (
+        config.expected_account_id != "275544662748"
+        or config.aws_region != "eu-west-1"
+        or config.cluster_name != "eks-platform-reliability-lab"
+    ):
+        raise LifecycleError(
+            "Historical recovery point permitted only for approved DEV lab"
+        )
     _require_tools("age", "pg_restore", "git")
     latest = discover_latest_backup_manifest(config)
     manifest = (
@@ -919,7 +927,7 @@ def validate_backup_manifest(config, manifest_path=None):
             and restore.get("database") == database
         ):
             raise LifecycleError("Historical backup restore-test provenance mismatch")
-        _verify_backup_restore_order(data, restore)
+        _verify_backup_restore_order(data, restore, historical_dev=historical_dev)
     # Historical recovery evidence may belong to an accepted
     # certification worktree rather than the current checkout.
     historical_roots = (

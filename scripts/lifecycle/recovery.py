@@ -474,7 +474,7 @@ def preflight_database_restore(config, manifest_path=None):
         verify_backup_restore_provenance,
     )
 
-    backup = validate_backup_manifest(config, manifest_path)
+    backup = validate_backup_manifest(config, manifest_path, historical_dev=True)
     restore_test_path = discover_latest_restore_test(config)
     restore_test = json.loads(restore_test_path.read_text(encoding='utf-8'))
     verify_backup_restore_provenance(config, backup, restore_test, historical_dev=True)
@@ -557,7 +557,7 @@ def restore_database(config, manifest_path):
         validate_backup_manifest, discover_latest_restore_test,
         verify_backup_restore_provenance,
     )
-    backup = validate_backup_manifest(config, manifest_file)
+    backup = validate_backup_manifest(config, manifest_file, historical_dev=True)
     restore_test = json.loads(discover_latest_restore_test(config).read_text())
     verify_backup_restore_provenance(config, backup, restore_test, historical_dev=True)
     check_db_fresh(config,values,manifest)
