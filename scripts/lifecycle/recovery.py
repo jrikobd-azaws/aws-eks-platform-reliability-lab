@@ -434,18 +434,7 @@ def _database_acceptance_query():
         "WHERE tc.table_schema='public' AND tc.table_name='" + table + "' "
         "AND tc.constraint_type='PRIMARY KEY' AND kcu.column_name='id')"
     )
-    owner_fk = (
-        "EXISTS (SELECT 1 FROM information_schema.referential_constraints rc "
-        "JOIN information_schema.key_column_usage kcu "
-        "ON kcu.constraint_schema=rc.constraint_schema "
-        "AND kcu.constraint_name=rc.constraint_name "
-        "JOIN information_schema.constraint_column_usage ccu "
-        "ON ccu.constraint_schema=rc.unique_constraint_schema "
-        "AND ccu.constraint_name=rc.unique_constraint_name "
-        "WHERE kcu.table_schema='public' AND kcu.table_name='item' "
-        "AND kcu.column_name='owner_id' AND ccu.table_schema='public' "
-        "AND ccu.table_name='user' AND ccu.column_name='id')"
-    )
+    owner_fk = 'EXISTS (SELECT 1 FROM pg_catalog.pg_constraint fk JOIN pg_catalog.pg_attribute src ON src.attrelid=fk.conrelid AND src.attnum=fk.conkey[1] JOIN pg_catalog.pg_attribute dst ON dst.attrelid=fk.confrelid AND dst.attnum=fk.confkey[1] WHERE fk.contype=\'f\' AND fk.conrelid=\'public.item\'::regclass AND fk.confrelid=\'public."user"\'::regclass AND cardinality(fk.conkey)=1 AND cardinality(fk.confkey)=1 AND src.attname=\'owner_id\' AND dst.attname=\'id\' AND fk.convalidated)'
     return (
         "SELECT current_user='app_runtime',"
         "(SELECT version_num='" + EXPECTED_ALEMBIC_REVISION + "' FROM alembic_version),"

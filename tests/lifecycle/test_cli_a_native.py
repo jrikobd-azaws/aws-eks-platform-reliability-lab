@@ -87,8 +87,9 @@ def test_database_acceptance_query_covers_schema_ownership_and_dml():
     assert "to_regclass('public.item')" in query
     assert query.count("data_type='uuid'") == 2
     assert query.count("constraint_type='PRIMARY KEY'") == 2
-    assert "kcu.column_name='owner_id'" in query
-    assert "ccu.column_name='id'" in query
+    assert "src.attname='owner_id'" in query
+    assert "dst.attname='id'" in query
+    assert "fk.convalidated" in query
     assert "has_database_privilege" in query
     assert "pg_get_userbyid(datdba)<>current_user" in query
     assert query.count("has_table_privilege") == 8
