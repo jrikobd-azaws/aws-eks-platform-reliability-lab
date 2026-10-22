@@ -597,7 +597,7 @@ def restore_database(config, manifest_path):
     # Do not equate the recovery controller revision with backup provenance.
     from lifecycle import (
         validate_backup_manifest, discover_latest_restore_test,
-        verify_backup_restore_provenance,
+        verify_backup_restore_provenance, sha256_approved_file,
     )
     backup = validate_backup_manifest(config, manifest_file, historical_dev=True)
     restore_test = json.loads(discover_latest_restore_test(config).read_text())
@@ -616,7 +616,7 @@ def restore_database(config, manifest_path):
     )
     if not any(encrypted.is_relative_to(root) for root in allowed_backup_roots):
         raise LifecycleError('Encrypted database backup outside authorized storage boundaries')
-    if sha256_file(encrypted)!=manifest['database_sha256']:
+    if sha256_approved_file(encrypted)!=manifest['database_sha256']:
         raise LifecycleError('Encrypted backup checksum mismatch')
     archive=call(['age','-d','-i',str(key),str(encrypted)])
     call(['pg_restore','--list'],data=archive)
