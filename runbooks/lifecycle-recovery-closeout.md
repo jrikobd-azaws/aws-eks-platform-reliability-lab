@@ -73,6 +73,29 @@ the existing account-bound confirmation and Project Owner approval. Do not run
 Terraform apply/destroy, force synchronization, pruning, CRD replacement, or a
 database restore as part of platform closeout.
 
+Before authorizing database restoration, run only the read-only backup,
+restore-test provenance, RDS identity and freshness checks. Proving that the
+private target database is empty additionally requires an existing approved
+network path with a PostgreSQL client. If no suitable running workload exists,
+`native-database-preflight` records the completed read-only checks and defers
+emptiness explicitly. The established private transport is the uniquely named
+temporary credential Secret and PostgreSQL client Pod created by the guarded
+restore operation; creating them requires the separate account-bound restore
+authorization. The empty-target query runs through that transport before
+`pg_restore`, and a non-empty or partially restored database remains blocked.
+
+The native restore refuses a non-empty target before `pg_restore`, validates
+Alembic `fe56fa70289e`, the `user` and `item` UUID primary keys, the item-owner
+foreign key, schema restrictions and `app_runtime` DML permissions. It writes
+sanitized status under a unique `native-database-restore-*/restore.json`
+evidence directory and updates the existing resume checkpoint without
+overwriting historical evidence. A failed or unverifiable cleanup leaves the
+database stage failed; never clear a partially restored database or retry it
+automatically. Evidence records restore failure independently as
+`PRE_RESTORE_FAILURE`, `PARTIAL_RESTORE_OR_UNKNOWN`, or
+`POST_RESTORE_VALIDATION_FAILED`, and records cleanup uncertainty separately as
+`TEMPORARY_RESOURCE_CLEANUP_INCOMPLETE`.
+
 Failures report the stage, command binary, exit status or timeout while
 suppressing command stderr. Preserve the private checkpoint and sanitized
 evidence; investigate the named stage and retry only after actual state is

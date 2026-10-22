@@ -444,7 +444,7 @@ def native_action(command,args):
         execute_plan,
         restore_test_backup,
     )
-    from recovery import restore_database, platform
+    from recovery import preflight_database_restore, restore_database, platform
     config=LabConfig.from_environment()
     if command=='native-backup': backup(config)
     elif command=='native-shutdown-plan': create_plan(config,args.tfvars,'shutdown')
@@ -456,6 +456,8 @@ def native_action(command,args):
         if not args.report or args.confirm!='RESTORE-'+config.expected_account_id:
             raise LifecycleError('Explicit RESTORE-account confirmation and manifest required')
         restore_database(config,args.report)
+    elif command=='native-database-preflight':
+        preflight_database_restore(config, args.report)
     elif command=='native-platform-restore': platform(config)
     elif command=='native-restore-test':
         restore_test_backup(
@@ -538,6 +540,7 @@ def main():
             "native-rebuild-plan",
             "native-rebuild-execute",
             "native-database-restore",
+            "native-database-preflight",
             "native-platform-restore",
             "native-restore-test",
             "native-shutdown-certify",

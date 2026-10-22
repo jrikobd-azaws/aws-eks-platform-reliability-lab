@@ -2,6 +2,8 @@
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 from unittest.mock import patch
 import pytest
 ROOT=Path(__file__).resolve().parents[2]
@@ -46,6 +48,151 @@ def test_restore_refuses_old_rds():
     c=LabConfig()
     with patch.object(r,'call',return_value=json.dumps({'DBInstances':[{'InstanceCreateTime':'2020-01-01T00:00:00Z','DBInstanceStatus':'available','Endpoint':{'Address':'test'}}]}).encode()):
         with pytest.raises(LifecycleError): r.check_db_fresh(c,{'rds_address':'test'},{'created_utc':'2026-10-16T00:00:00Z'})
+
+
+def test_check_db_fresh_is_read_only():
+    from foundation import LabConfig
+    config = LabConfig()
+    response = json.dumps({'DBInstances': [{
+        'InstanceCreateTime': '2026-10-22T00:00:00Z',
+        'DBInstanceStatus': 'available',
+        'Endpoint': {'Address': 'approved.rds.amazonaws.com'},
+    }]}).encode()
+    with patch.object(r, 'call', return_value=response) as invoked:
+        r.check_db_fresh(
+            config,
+            {'rds_address': 'approved.rds.amazonaws.com'},
+            {'created_utc': '2026-10-21T00:00:00Z'},
+        )
+    invoked.assert_called_once()
+    argv = invoked.call_args.args[0]
+    assert argv == [
+        'aws', 'rds', 'describe-db-instances', '--db-instance-identifier',
+        config.cluster_name + '-postgres', '--output', 'json',
+    ]
+
+
+def test_empty_target_query_matches_native_restore_contract():
+    assert "pg_catalog" in r.EMPTY_TARGET_QUERY
+    assert "information_schema" in r.EMPTY_TARGET_QUERY
+    assert "pg_toast%" in r.EMPTY_TARGET_QUERY
+    assert "pg_temp_%" in r.EMPTY_TARGET_QUERY
+    assert "('r','p','v','m','S','f')" in r.EMPTY_TARGET_QUERY
+
+
+def test_database_acceptance_query_covers_schema_ownership_and_dml():
+    query = r._database_acceptance_query()
+    assert r.EXPECTED_ALEMBIC_REVISION in query
+    assert "to_regclass('public.user')" in query
+    assert "to_regclass('public.item')" in query
+    assert query.count("data_type='uuid'") == 2
+    assert query.count("constraint_type='PRIMARY KEY'") == 2
+    assert "kcu.column_name='owner_id'" in query
+    assert "ccu.column_name='id'" in query
+    assert "has_database_privilege" in query
+    assert "pg_get_userbyid(datdba)<>current_user" in query
+    assert query.count("has_table_privilege") == 8
+
+
+def test_database_acceptance_rejects_incomplete_schema():
+    execute = Mock(return_value=("|".join(('t',) * 20) + "|f").encode())
+    with pytest.raises(LifecycleError, match="Alembic, schema, ownership"):
+        r._validate_restored_database(execute)
+
+
+def test_database_acceptance_accepts_complete_schema():
+    complete = '|'.join(('t',) * 10 + ('f',) * 2 + ('t',) * 9).encode()
+    execute = Mock(return_value=complete)
+    r._validate_restored_database(execute)
+    submitted = execute.call_args.args[0]
+    assert 'app_runtime' in submitted
+    assert 'fe56fa70289e' in submitted
+
+
+def test_restore_cleanup_deletes_only_unique_resources_and_proves_absence():
+    config = SimpleNamespace(environment=lambda: {})
+    with patch.object(r, 'call') as delete, patch.object(r, 'output', return_value='') as get:
+        assert r._cleanup_restore_resources(config, 'restore-pod-abc', 'restore-secret-abc')
+    assert delete.call_count == 2
+    assert get.call_count == 2
+    assert {call.args[0][5] for call in delete.call_args_list} == {
+        'restore-pod-abc', 'restore-secret-abc'
+    }
+
+
+def test_restore_cleanup_failure_is_not_accepted():
+    config = SimpleNamespace(environment=lambda: {})
+    with patch.object(r, 'call', side_effect=LifecycleError('delete failed')), \
+         patch.object(r, 'output', return_value=''):
+        assert not r._cleanup_restore_resources(
+            config, 'restore-pod-abc', 'restore-secret-abc'
+        )
+
+
+def test_partial_restore_and_cleanup_failures_are_distinct():
+    restore, cleanup = r._restore_failure_categories(
+        LifecycleError('restore interrupted'),
+        restore_attempted=True,
+        archive_restore_completed=False,
+        cleanup_verified=False,
+    )
+    assert restore == 'PARTIAL_RESTORE_OR_UNKNOWN'
+    assert cleanup == 'TEMPORARY_RESOURCE_CLEANUP_INCOMPLETE'
+
+
+def test_cleanup_only_failure_does_not_invent_restore_failure():
+    restore, cleanup = r._restore_failure_categories(
+        None,
+        restore_attempted=True,
+        archive_restore_completed=True,
+        cleanup_verified=False,
+    )
+    assert restore is None
+    assert cleanup == 'TEMPORARY_RESOURCE_CLEANUP_INCOMPLETE'
+
+
+def test_database_preflight_does_not_require_backend_or_kubernetes(tmp_path):
+    from foundation import LabConfig
+    config = LabConfig(evidence_dir=tmp_path)
+    restore_test = tmp_path / 'restore-test.json'
+    restore_test.write_text('{}')
+    backup = {
+        'manifest': tmp_path / 'backup-manifest.json',
+        'manifest_data': {'created_utc': '2026-10-21T00:00:00Z'},
+        'values': {'rds_address': 'approved.rds.amazonaws.com'},
+        'database': 'app',
+        'host': 'approved.rds.amazonaws.com',
+        'database_sha256': 'a' * 64,
+        'source_revision': 'b' * 40,
+        'recovery_controller_revision': 'c' * 40,
+    }
+    with patch.object(r, 'account_guard'), \
+         patch('lifecycle.validate_backup_manifest', return_value=backup), \
+         patch('lifecycle.discover_latest_restore_test', return_value=restore_test), \
+         patch('lifecycle.verify_backup_restore_provenance'), \
+         patch.object(r, 'check_db_fresh'), \
+         patch.object(r, 'call') as command:
+        report = r.preflight_database_restore(config)
+    command.assert_not_called()
+    evidence = json.loads(report.read_text())
+    assert evidence['status'] == 'passed_pending_authorized_target_check'
+    assert evidence['target_emptiness_verified'] is False
+    assert evidence['restore_authorization_required'] == (
+        'RESTORE-' + config.expected_account_id
+    )
+
+
+def test_native_database_preflight_cli_is_exposed_without_confirmation():
+    source = (ROOT / 'scripts/lifecycle/labctl.py').read_text()
+    assert "elif command=='native-database-preflight'" in source
+    assert 'preflight_database_restore(config, args.report)' in source
+
+
+def test_native_database_restore_keeps_account_bound_authorization():
+    import labctl
+    args = SimpleNamespace(report='/tmp/manifest.json', confirm='wrong')
+    with pytest.raises(LifecycleError, match='Explicit RESTORE-account confirmation'):
+        labctl.native_action('native-database-restore', args)
 
 def test_no_aws_calls_in_policy():
     with patch.object(r,'call') as mocked:

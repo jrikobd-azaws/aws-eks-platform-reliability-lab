@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import collections
+import http.client
+import ssl
 import base64
 import hashlib
 import json
@@ -91,6 +93,7 @@ class RecoveryBootstrap:
         self._owned_tunnel: subprocess.Popen | None = None
         self._argocd_cli: Path | None = None
         self.verified_server: str | None = None
+        self._session_token: str | None = None
 
     def _capture(self, args, *, timeout=120, env=None) -> str:
         return self.runner.run(args, timeout=timeout, env=env).stdout.strip()
@@ -623,30 +626,63 @@ class RecoveryBootstrap:
         return "UNAUTHENTICATED" in detail or "CATEGORY=ARGOCD_AUTH" in detail
 
     def _argocd_login(self, cli: Path, server: str) -> None:
-        """Use the approved secret through stdin; never place passwords in argv."""
+        """Create an in-memory Argo CD session over authenticated TLS.
+
+        Trust is anchored in the deployed Argo CD server TLS certificate,
+        retrieved from the already verified Kubernetes destination. A localhost
+        tunnel is not by itself a server identity guarantee.
+        """
         password = self._argocd_admin_password()
+        cert_secret = self._json([
+            "kubectl", "-n", "argocd", "get", "secret", "argocd-secret",
+            "-o", "json",
+        ], env=self.config.environment())
         try:
-            result = subprocess.run(
-                [str(cli), "login", server, "--username", "admin",
-                 "--password-stdin"],
-                input=password, capture_output=True, text=True, timeout=30,
-                env=self.config.environment(),
-            )
-            if result.returncode != 0:
-                detail = (result.stderr or "").lower()
-                if "unknown flag" in detail or "password-stdin" in detail:
-                    raise LifecycleError(
-                        "ARGOCD_AUTHENTICATION_FAILED: CLI lacks secure password-stdin; "
-                        "operator must configure an approved authenticated CLI context"
-                    )
-                raise LifecycleError(
-                    "ARGOCD_AUTHENTICATION_FAILED: approved initial credential rejected; "
-                    "operator must verify existing credential and server identity"
-                )
-        except subprocess.TimeoutExpired:
-            raise LifecycleError("ARGOCD_AUTHENTICATION_FAILED: login timed out") from None
+            pem = base64.b64decode(cert_secret["data"]["tls.crt"], validate=True).decode("ascii")
+            if "-----BEGIN CERTIFICATE-----" not in pem:
+                raise ValueError("Invalid certificate")
+        except (KeyError, TypeError, ValueError, UnicodeError) as exc:
+            raise LifecycleError("ARGOCD_TLS_TRUST_UNAVAILABLE: approved server certificate missing") from None
+        # Authenticate the certificate against the Kubernetes Service DNS name,
+        # while TCP traffic traverses the localhost-only port-forward.
+        context = ssl.create_default_context(cadata=pem)
+        expected_name = "argocd-server"
+        port = int(server.rsplit(":", 1)[1])
+        token = None
+        try:
+            connection = http.client.HTTPSConnection("127.0.0.1", port, timeout=20, context=context)
+            # Override SNI/hostname verification, not the TCP tunnel destination.
+            def verified_connect():
+                sock = socket.create_connection(("127.0.0.1", port), timeout=20)
+                try:
+                    connection.sock = context.wrap_socket(sock, server_hostname=expected_name)
+                except BaseException:
+                    sock.close()
+                    raise
+            connection.connect = verified_connect
+            try:
+                payload = json.dumps({"username": "admin", "password": password}).encode()
+                connection.request("POST", "/api/v1/session", body=payload,
+                                   headers={"Content-Type": "application/json"})
+                response = connection.getresponse()
+                if response.status != 200:
+                    raise LifecycleError("ARGOCD_AUTHENTICATION_FAILED: session API rejected approved credential")
+                body = response.read(65537)
+                if len(body) > 65536:
+                    raise LifecycleError("ARGOCD_AUTHENTICATION_FAILED: oversized session response")
+                value = json.loads(body)
+                token = value.get("token") if isinstance(value, dict) else None
+                if not isinstance(token, str) or not token:
+                    raise LifecycleError("ARGOCD_AUTHENTICATION_FAILED: missing session token")
+            finally:
+                connection.close()
+        except (ssl.SSLError, OSError, TimeoutError) as exc:
+            raise LifecycleError("ARGOCD_TLS_OR_TRANSPORT_FAILED: verified session unavailable") from None
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise LifecycleError("ARGOCD_AUTHENTICATION_FAILED: malformed session response") from None
         finally:
             del password
+        self._session_token = token
 
     def _verify_argocd_auth(self, cli: Path, server: str) -> None:
         """Verify Application API access, not just account queries.
@@ -655,12 +691,18 @@ class RecoveryBootstrap:
         expired or server-mismatched token, but ``argocd app list``
         requires a valid token for the exact server address.
         """
+        env = self.config.environment()
+        if self._session_token:
+            env["ARGOCD_AUTH_TOKEN"] = self._session_token
         self.runner.run([
             cli, "account", "get-user-info", "--server", server,
-        ], timeout=30)
+        ], timeout=30, env=env)
         self.runner.run([
             cli, "app", "list", "--server", server,
-        ], timeout=30)
+        ], timeout=30, env=env)
+        self.runner.run([
+            cli, "app", "get", "platform-root", "-o", "json", "--server", server,
+        ], timeout=30, env=env)
 
     @contextlib.contextmanager
     def argocd_session(self) -> Iterator[str]:
@@ -738,6 +780,7 @@ class RecoveryBootstrap:
                         process.wait(timeout=5)
                 self._owned_tunnel = None
         finally:
+            self._session_token = None
             if previous_path is None:
                 os.environ.pop("PATH", None)
             else:

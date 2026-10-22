@@ -197,11 +197,14 @@ class PlatformRecovery:
         return ["--server", server]
 
     def run(self, args, *, data: bytes | None = None, timeout: int = 1200) -> bytes:
+        env = environment(self.config)
+        if args and str(args[0]) == "argocd" and self.bootstrap and self.bootstrap._session_token:
+            env["ARGOCD_AUTH_TOKEN"] = self.bootstrap._session_token
         return self.executor(
             args,
             data=data,
             timeout=timeout,
-            env=environment(self.config),
+            env=env,
         )
 
     def text(self, args, *, timeout: int = 1200) -> str:

@@ -682,7 +682,7 @@ def test_verify_argocd_auth_checks_app_list_not_just_user_info(tmp_path, monkeyp
     boot.runner.run = Mock(side_effect=fake_run)
     boot._verify_argocd_auth(cli, server)
 
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert "get-user-info" in " ".join(str(a) for a in calls[0])
     assert "app" in calls[1] and "list" in calls[1]
     assert "--server" in calls[0]
@@ -729,32 +729,93 @@ def test_non_auth_error_never_triggers_admin_login(tmp_path, monkeypatch):
     boot._argocd_login.assert_not_called()
 
 
-def test_login_no_password_argv_or_insecure(tmp_path, monkeypatch):
+def test_session_api_token_is_memory_only(tmp_path, monkeypatch):
+    import base64
+    import bootstrap as module
     boot = RecoveryBootstrap(config(tmp_path), Mock())
     boot._argocd_admin_password = Mock(return_value="synthetic-password")
-    observed = []
-    def fake_run(argv, **kw):
-        observed.append((argv, kw))
-        return subprocess.CompletedProcess(argv, 0, "", "")
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    boot._json = Mock(return_value={"data": {
+        "tls.crt": base64.b64encode(b"-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----").decode()
+    }})
+    monkeypatch.setattr(module.ssl, "create_default_context", lambda **kwargs: Mock())
+    seen = {}
+    class Response:
+        status = 200
+        def read(self, limit):
+            return b'{"token":"synthetic-token"}'
+    class Connection:
+        def __init__(self, *args, **kwargs):
+            pass
+        def request(self, method, path, body, headers):
+            seen["method"] = method
+            seen["path"] = path
+            seen["body"] = body
+        def getresponse(self):
+            return Response()
+        def close(self):
+            pass
+    monkeypatch.setattr(module.http.client, "HTTPSConnection", Connection)
     boot._argocd_login(Path("/approved/argocd"), "127.0.0.1:8443")
-    argv, kw = observed[0]
-    assert "--password-stdin" in argv
-    assert "--insecure" not in argv
-    assert "--password" not in argv
-    assert "synthetic-password" not in " ".join(argv)
-    assert kw["input"] == "synthetic-password"
+    assert seen["method"] == "POST"
+    assert seen["path"] == "/api/v1/session"
+    assert b"synthetic-password" in seen["body"]
+    assert boot._session_token == "synthetic-token"
 
 
-def test_unsupported_stdin_fails_without_fallback(tmp_path, monkeypatch):
-    from foundation import LifecycleError
+def test_missing_server_tls_certificate_fails_before_session_request(tmp_path, monkeypatch):
     boot = RecoveryBootstrap(config(tmp_path), Mock())
     boot._argocd_admin_password = Mock(return_value="synthetic-password")
-    calls = []
-    def fake_run(argv, **kw):
-        calls.append(argv)
-        return subprocess.CompletedProcess(argv, 1, "", "unknown flag: --password-stdin")
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    with pytest.raises(LifecycleError, match="lacks secure password-stdin"):
+    boot._json = Mock(return_value={"data": {}})
+    with pytest.raises(LifecycleError, match="TLS_TRUST_UNAVAILABLE"):
         boot._argocd_login(Path("/approved/argocd"), "127.0.0.1:8443")
-    assert len(calls) == 1
+    assert boot._session_token is None
+
+
+def test_argocd_token_not_forwarded_to_non_argocd_commands(tmp_path):
+    from recover_platform import PlatformRecovery
+    from foundation import CheckpointStore
+    seen = []
+    def executor(args, **kwargs):
+        seen.append((args, kwargs["env"]))
+        return b""
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    boot._session_token = "synthetic-token"
+    manager = PlatformRecovery(boot.config, CheckpointStore(tmp_path / "cp.json"), executor=executor, bootstrap=boot)
+    manager.run(["kubectl", "get", "pods"])
+    manager.run(["argocd", "app", "list"])
+    assert "ARGOCD_AUTH_TOKEN" not in seen[0][1]
+    assert seen[1][1]["ARGOCD_AUTH_TOKEN"] == "synthetic-token"
+
+
+def test_tls_hostname_failure_prevents_password_transmission(tmp_path, monkeypatch):
+    import base64
+    import ssl
+    import bootstrap as module
+    boot = RecoveryBootstrap(config(tmp_path), Mock())
+    boot._argocd_admin_password = Mock(return_value="synthetic-password")
+    boot._json = Mock(return_value={"data": {
+        "tls.crt": base64.b64encode(b"-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----").decode()
+    }})
+    class Sock:
+        def close(self):
+            pass
+    class Context:
+        def wrap_socket(self, sock, server_hostname):
+            assert server_hostname == "argocd-server"
+            raise ssl.SSLCertVerificationError("hostname mismatch")
+    monkeypatch.setattr(module.ssl, "create_default_context", lambda **kwargs: Context())
+    monkeypatch.setattr(module.socket, "create_connection", lambda *a, **kw: Sock())
+    transmitted = []
+    class Connection:
+        def __init__(self, *a, **kw):
+            pass
+        def request(self, method, path, body, headers):
+            self.connect()
+            transmitted.append(body)
+        def close(self):
+            pass
+    monkeypatch.setattr(module.http.client, "HTTPSConnection", Connection)
+    with pytest.raises(LifecycleError, match="TLS_OR_TRANSPORT_FAILED"):
+        boot._argocd_login(Path("/approved/argocd"), "127.0.0.1:8443")
+    assert not transmitted
+    assert boot._session_token is None
