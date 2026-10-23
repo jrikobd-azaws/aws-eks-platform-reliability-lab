@@ -54,6 +54,35 @@ def collect_saved_json(text):
             if "delete" in actions and "create" in actions:
                 results.append({"type": "terraform_replacement", "source": location,
                                 "address": str(node.get("address", ""))[:160]})
+        # Argo CD status from saved `argocd app get -o json` output.
+        if isinstance(node.get("sync"), dict) and isinstance(node.get("health"), dict):
+            sync_status = node["sync"].get("status")
+            health_status = node["health"].get("status")
+            if sync_status == "OutOfSync" or health_status == "Degraded":
+                results.append({"type": "argocd_state", "source": location,
+                                "sync": sync_status, "health": health_status})
+        # Kubernetes Pod status snapshots.
+        if node.get("phase") == "Pending" and "containerStatuses" in node:
+            results.append({"type": "kubernetes_pod_pending", "source": location})
+        # Prometheus Alertmanager alert snapshots.
+        if node.get("state") == "firing" and isinstance(node.get("labels"), dict):
+            results.append({"type": "prometheus_alert_firing", "source": location,
+                            "alertname": str(node["labels"].get("alertname", ""))[:100]})
+        # A Terraform plan is evidence, not a request to execute the actions.
+        if isinstance(changes, dict) and isinstance(changes.get("actions"), list):
+            if changes["actions"] == ["delete"]:
+                results.append({"type": "terraform_deletion", "source": location,
+                                "address": str(node.get("address", ""))[:160]})
+        # Lifecycle checkpoint metadata can indicate unresolved stages.
+        if node.get("status") in ("running", "failed") and "result" in node:
+            results.append({"type": "lifecycle_stage_unresolved", "source": location,
+                            "status": node["status"]})
+        # PostgreSQL and application health reports.
+        if node.get("schema_and_permissions_verified") is False:
+            results.append({"type": "postgresql_schema_unverified", "source": location})
+        # GitHub Actions exported JSON job status.
+        if node.get("conclusion") == "failure" and "steps" in node:
+            results.append({"type": "github_actions_failed_job", "source": location})
         if node.get("verified") is False and node.get("operation") in ("shutdown", "restore"):
             results.append({"type": "lifecycle_unverified", "source": location})
     return results[:100]
