@@ -161,7 +161,22 @@ def diagnose(record):
     structured += collect_saved_json(str(record.get("symptoms", "")))
     record["signature_matches"] = hits
     record["observations"] = [dict(type="pattern_match", signature=h["id"]) for h in hits] + structured[:100]
-    record["hypotheses"] = [dict(hypothesis=h["id"], status="unverified") for h in hits]
+    record["hypotheses"] = [dict(hypothesis=h["id"], status="unverified",
+                                   supporting_observations=[o["type"] for o in structured
+                                     if (o.get("type", "").startswith(h["domain"])
+                                         or (h["domain"] == "kubernetes" and o.get("type", "").startswith("kubernetes")))][:10])
+                            for h in hits]
+    ids = {h["id"] for h in hits}
+    correlations = []
+    if "K8S_IMAGE_PULL" in ids and "ARGO_SYNC" in ids:
+        correlations.append(dict(type="cross_layer", components=["gitops", "kubernetes"],
+                                 hypothesis="GitOps degradation may be related to image retrieval failure",
+                                 confidence="unverified"))
+    if "PG_CONNECT" in ids and ("K8S_PROBE" in ids or "K8S_SCHEDULING" in ids):
+        correlations.append(dict(type="cross_layer", components=["postgresql", "kubernetes"],
+                                 hypothesis="Application readiness may depend on database connectivity",
+                                 confidence="unverified"))
+    record["correlations"] = correlations
     record["missing_evidence"] = [
         "Candidate signatures do not establish a root cause; independently verify the affected component, timeline and configuration."
     ] if hits else ["No recognised failure signature; gather events, logs and configuration."]
