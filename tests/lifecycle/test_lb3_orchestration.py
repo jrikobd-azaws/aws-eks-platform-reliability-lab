@@ -665,3 +665,125 @@ def test_native_stage3_authentication_failure_blocks_sync(
 
     assert "stage3_sync" not in observed
     assert "stage_started" not in observed
+
+
+# LB3 failed-backup evidence-boundary and controlled rollover tests.
+
+def test_backup_checksum_explicit_evidence_boundary(tmp_path):
+    import lifecycle
+
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    archive = approved / "database.dump.age"
+    archive.write_bytes(b"offline-encrypted-fixture")
+    archive.chmod(0o600)
+
+    digest = lifecycle.sha256_file(
+        archive, allowed_roots=(approved,)
+    )
+    import hashlib
+    assert digest == hashlib.sha256(archive.read_bytes()).hexdigest()
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    bad = outside / "archive"
+    bad.write_bytes(b"not-authorised")
+
+    with pytest.raises(LifecycleError, match="outside authorized"):
+        lifecycle.sha256_file(
+            bad, allowed_roots=(approved,)
+        )
+
+
+def test_backup_checksum_rejects_symlink(tmp_path):
+    import lifecycle
+
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    real = approved / "real"
+    real.write_bytes(b"test")
+
+    link = approved / "linked"
+    link.symlink_to(real)
+
+    with pytest.raises(LifecycleError, match="Symlink"):
+        lifecycle.sha256_file(
+            link, allowed_roots=(approved,)
+        )
+
+
+def test_failed_backup_requires_bound_restart_approval(harness):
+    ctl, adapter, root = harness
+    adapter.fail = "backup"
+
+    with pytest.raises(LifecycleError):
+        ctl.shutdown(
+            phase="prepare",
+            approvals=OperatorApprovals(
+                backup="BACKUP-275544662748"
+            ),
+        )
+
+    preflight = ctl.preflight("shutdown")
+    token = preflight["failed_backup_restart_approval"]
+
+    assert token.startswith("RESTART-BACKUP-275544662748-")
+    assert preflight["stages"]["backup"]["status"] == "failed"
+
+    with pytest.raises(LifecycleError, match="authorisation"):
+        ctl.restart_failed_backup(approval="wrong-token")
+
+    assert ctl._load()["stages"]["backup"]["status"] == "failed"
+    assert not list(root.glob("lb3-shutdown-failed-backup-*.json"))
+
+
+def test_failed_backup_archives_and_opens_new_attempt(harness):
+    ctl, adapter, root = harness
+    adapter.fail = "backup"
+
+    with pytest.raises(LifecycleError):
+        ctl.shutdown(
+            phase="prepare",
+            approvals=OperatorApprovals(
+                backup="BACKUP-275544662748"
+            ),
+        )
+
+    old = ctl._load()
+    token = ctl.preflight("shutdown")[
+        "failed_backup_restart_approval"
+    ]
+
+    result = ctl.restart_failed_backup(approval=token)
+
+    archived = Path(result["historical_checkpoint"])
+    assert archived.exists()
+    assert json.loads(archived.read_text()) == old
+    assert result["previous_backup_status"] == "failed"
+
+    current = ctl._load()
+    assert current["operation"] is None
+    assert current["stages"] == {}
+    assert current["previous_failed_checkpoint"] == str(archived)
+
+    assert adapter.calls.count("backup") == 1
+    assert "restore_test" not in adapter.calls
+    assert "apply" not in adapter.calls
+
+
+def test_failed_backup_restart_refuses_other_stages(harness):
+    ctl, adapter, _ = harness
+    state = ctl._state("shutdown")
+    state["stages"] = {
+        "backup": {"status": "failed", "time": "old"},
+        "restore_test": {"status": "failed", "time": "old"},
+    }
+    ctl._save(state)
+
+    assert ctl.failed_backup_restart_approval() is None
+    with pytest.raises(
+        LifecycleError, match="No eligible failed-only"
+    ):
+        ctl.restart_failed_backup(approval="anything")
+
+    assert ctl._load() == state

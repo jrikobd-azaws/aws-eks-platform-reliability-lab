@@ -493,7 +493,7 @@ def main():
     parser.add_argument('--confirm', help='Explicit account-specific approval')
 
     # LB3 safe-by-default command family. All execution approvals are separate.
-    parser.add_argument('--lb3-phase', choices=('preflight', 'prepare', 'execute', 'reconcile'), default='preflight')
+    parser.add_argument('--lb3-phase', choices=('preflight', 'prepare', 'execute', 'reconcile', 'restart-backup'), default='preflight')
     parser.add_argument('--reconcile-stage', help='Interrupted LB3 stage; no action replay')
     parser.add_argument('--reconcile-evidence', help='Private manifest or plan for reconciliation')
     parser.add_argument('--reconcile-approval', help='Checkpoint-bound independent reconciliation approval')
@@ -601,6 +601,10 @@ def main():
                 args.command, stage=args.reconcile_stage,
                 approval=args.reconcile_approval,
                 evidence=args.reconcile_evidence, tfvars=args.tfvars,
+            )
+        elif args.command == "shutdown" and args.lb3_phase == "restart-backup":
+            result = coordinator.restart_failed_backup(
+                approval=args.reconcile_approval
             )
         elif args.command == "shutdown":
             result = coordinator.shutdown(
