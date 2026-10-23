@@ -787,3 +787,216 @@ def test_failed_backup_restart_refuses_other_stages(harness):
         ctl.restart_failed_backup(approval="anything")
 
     assert ctl._load() == state
+
+
+# LB3 authoritative shutdown-plan evidence regression coverage.
+
+def test_shutdown_plan_saved_under_configured_evidence(
+    tmp_path, monkeypatch
+):
+    import hashlib
+    import lifecycle
+    from types import SimpleNamespace
+
+    evidence = tmp_path / "private-evidence"
+    evidence.mkdir(mode=0o700)
+
+    tfvars = tmp_path / "approved.tfvars.json"
+    tfvars.write_text("{}")
+    tfvars.chmod(0o600)
+
+    from foundation import LabConfig
+
+    config = LabConfig(
+        evidence_dir=evidence,
+        expected_account_id="275544662748",
+        aws_region="eu-west-1",
+        cluster_name="eks-platform-reliability-lab",
+    )
+
+    targets = ["module.eks.aws_eks_cluster.this"]
+    executed = []
+
+    monkeypatch.setattr(
+        lifecycle, "account_guard", lambda config: None
+    )
+    monkeypatch.setattr(
+        lifecycle, "checked_inputs", lambda path: tfvars
+    )
+    monkeypatch.setattr(
+        lifecycle, "output", lambda argv, **kwargs: (
+            "\n".join(targets)
+        )
+    )
+
+    def fake_call(argv, **kwargs):
+        executed.append(list(argv))
+
+        if "plan" in argv:
+            out = next(
+                x[5:] for x in argv
+                if isinstance(x, str) and x.startswith("-out=")
+            )
+            Path(out).write_bytes(b"offline-terraform-plan")
+            Path(out).chmod(0o600)
+            return b""
+
+        if "pull" in argv:
+            return json.dumps({
+                "lineage": "offline-lineage",
+                "serial": 66,
+            }).encode()
+
+        raise AssertionError("Unexpected external command")
+
+    monkeypatch.setattr(lifecycle, "call", fake_call)
+    monkeypatch.setattr(
+        lifecycle, "plan_json",
+        lambda config, path: {
+            "resource_changes": [{
+                "address": targets[0],
+                "mode": "managed",
+                "change": {"actions": ["delete"]},
+            }]
+        },
+    )
+
+    result = lifecycle.create_plan(
+        config, str(tfvars), "shutdown"
+    )
+
+    assert result.is_file()
+    assert result.is_relative_to(evidence)
+
+    record = json.loads(result.read_text())
+    binary = Path(record["plan"])
+
+    assert binary.is_file()
+    assert binary.is_relative_to(evidence)
+    assert record["kind"] == "shutdown"
+    assert record["state_serial"] == 66
+    assert record["targets"] == targets
+    assert record["plan_sha256"] == hashlib.sha256(
+        binary.read_bytes()
+    ).hexdigest()
+
+    assert len([x for x in executed if "plan" in x]) == 1
+    assert not any("apply" in x for x in executed)
+
+
+def test_native_adapter_verifies_external_private_plan(
+    tmp_path, monkeypatch
+):
+    import hashlib
+    import lifecycle
+    from orchestrate import NativeAdapter
+    from types import SimpleNamespace
+
+    evidence = tmp_path / "private-evidence"
+    evidence.mkdir(mode=0o700)
+    binary = evidence / "terraform.tfplan"
+    binary.write_bytes(b"offline-saved-plan")
+    binary.chmod(0o600)
+
+    tfvars = tmp_path / "reviewed.tfvars.json"
+    tfvars.write_text("{}")
+    tfvars.chmod(0o600)
+
+    target = "module.eks.aws_eks_cluster.this"
+    summary = evidence / "plan.json"
+
+    summary.write_text(json.dumps({
+        "kind": "shutdown",
+        "account": "275544662748",
+        "region": "eu-west-1",
+        "cluster": "eks-platform-reliability-lab",
+        "tfvars_sha256": hashlib.sha256(
+            tfvars.read_bytes()
+        ).hexdigest(),
+        "plan": str(binary),
+        "plan_sha256": hashlib.sha256(
+            binary.read_bytes()
+        ).hexdigest(),
+        "targets": [target],
+        "state_lineage": "offline-lineage",
+        "state_serial": 66,
+    }))
+    summary.chmod(0o600)
+
+    from foundation import LabConfig
+
+    config = LabConfig(
+        evidence_dir=evidence,
+        expected_account_id="275544662748",
+        aws_region="eu-west-1",
+        cluster_name="eks-platform-reliability-lab",
+    )
+
+    monkeypatch.setattr(
+        lifecycle, "checked_inputs", lambda path: tfvars
+    )
+    monkeypatch.setattr(
+        lifecycle, "call",
+        lambda argv, **kwargs: json.dumps({
+            "lineage": "offline-lineage",
+            "serial": 66,
+        }).encode(),
+    )
+    monkeypatch.setattr(
+        lifecycle, "plan_json",
+        lambda config, path: {
+            "resource_changes": [{
+                "address": target,
+                "mode": "managed",
+                "change": {"actions": ["delete"]},
+            }]
+        },
+    )
+
+    adapter = NativeAdapter(config)
+    assert adapter.verify_plan(
+        summary, str(tfvars), "shutdown"
+    ) is True
+
+    binary.write_bytes(b"tampered-plan")
+    assert adapter.verify_plan(
+        summary, str(tfvars), "shutdown"
+    ) is False
+
+
+def test_shutdown_plan_checksum_rejects_outside_boundary(
+    tmp_path
+):
+    import lifecycle
+
+    evidence = tmp_path / "approved"
+    evidence.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    binary = outside / "terraform.tfplan"
+    binary.write_bytes(b"unapproved")
+
+    with pytest.raises(
+        LifecycleError, match="outside authorized"
+    ):
+        lifecycle.sha256_file(
+            binary, allowed_roots=(evidence,)
+        )
+
+
+def test_shutdown_plan_checksum_rejects_symlink(tmp_path):
+    import lifecycle
+
+    evidence = tmp_path / "approved"
+    evidence.mkdir()
+    real = evidence / "terraform.tfplan"
+    real.write_bytes(b"test")
+
+    link = evidence / "linked.tfplan"
+    link.symlink_to(real)
+
+    with pytest.raises(LifecycleError, match="Symlink"):
+        lifecycle.sha256_file(
+            link, allowed_roots=(evidence,)
+        )

@@ -647,7 +647,7 @@ def fresh_dir(prefix):
 def create_plan(config, tfvars, kind):
     account_guard(config)
     var=checked_inputs(tfvars)
-    dest=fresh_dir('native-'+kind)
+    dest=_fresh_certification_dir(config, 'native-'+kind)
     args=['terraform',f'-chdir={TF}','plan','-input=false','-lock-timeout=60s','-var-file='+str(var)]
     targets=[]
     if kind=='shutdown':
@@ -664,7 +664,7 @@ def create_plan(config, tfvars, kind):
     # A rebuild must only create managed resources. Retained resources must be no-ops.
     summary={'schema':1,'kind':kind,'created_utc':utc_now(),'account':config.expected_account_id,
         'region':config.aws_region,'cluster':config.cluster_name,'tfvars_sha256':sha256_approved_file(var),
-        'plan':str(saved),'plan_sha256':sha256_file(saved),'targets':targets,'policy':checked,
+        'plan':str(saved),'plan_sha256':sha256_file(saved, allowed_roots=(config.evidence_dir.resolve(),)),'targets':targets,'policy':checked,
         'state_lineage':None}
     state=json.loads(call(['terraform',f'-chdir={TF}','state','pull'],env=environment(config)))
     summary['state_lineage']=state.get('lineage')
@@ -684,7 +684,7 @@ def execute_plan(config, report, confirmation, tfvars):
     path = raw_path.resolve()
     if path.is_symlink():
         raise LifecycleError('Symlink plan report refused')
-    if not path.is_file() or not path.is_relative_to(BASE.resolve()):
+    if not path.is_file() or not path.is_relative_to(config.evidence_dir.resolve()):
         raise LifecycleError('Plan report must exist under private lifecycle evidence')
     info=json.loads(path.read_text())
     if info.get('account')!=config.expected_account_id or info.get('region')!=config.aws_region or info.get('cluster')!=config.cluster_name:
@@ -703,9 +703,9 @@ def execute_plan(config, report, confirmation, tfvars):
     saved = raw_plan.resolve()
     if saved.is_symlink() or not saved.is_file():
         raise LifecycleError('Saved plan missing or invalid')
-    if not saved.is_relative_to(BASE.resolve()):
+    if not saved.is_relative_to(config.evidence_dir.resolve()):
         raise LifecycleError('Saved plan must exist under private lifecycle evidence')
-    if sha256_file(saved)!=info['plan_sha256']:
+    if sha256_approved_file(saved)!=info['plan_sha256']:
         raise LifecycleError('Saved plan checksum mismatch')
     state=json.loads(call(['terraform',f'-chdir={TF}','state','pull'],env=environment(config)))
     if (state.get('lineage'),state.get('serial')) != (info['state_lineage'],info['state_serial']):
@@ -1512,10 +1512,10 @@ def certify_shutdown(config, *, plan_report, tfvars, confirmation):
     ):
         raise LifecycleError("Shutdown plan identity mismatch")
     var = checked_inputs(tfvars)
-    if sha256_file(var) != plan.get("tfvars_sha256"):
+    if sha256_approved_file(var) != plan.get("tfvars_sha256"):
         raise LifecycleError("Terraform inputs changed since plan")
     saved = _private_evidence_file(config, plan.get("plan"), "saved shutdown plan")
-    if sha256_file(saved) != plan.get("plan_sha256"):
+    if sha256_approved_file(saved) != plan.get("plan_sha256"):
         raise LifecycleError("Saved shutdown plan checksum mismatch")
     required = (
         "CERTIFY-" + config.expected_account_id + "-" + plan["plan_sha256"][:12]
@@ -1557,7 +1557,7 @@ def certify_shutdown(config, *, plan_report, tfvars, confirmation):
         "database_backup": str(backup["backup"]),
         "database_sha256": backup["database_sha256"],
         "restore_test_report": str(restore_path),
-        "restore_test_sha256": sha256_file(restore_path),
+        "restore_test_sha256": sha256_approved_file(restore_path),
         "plan_report": str(report_path),
         "plan_sha256": plan["plan_sha256"],
         "state_lineage": plan["state_lineage"],
