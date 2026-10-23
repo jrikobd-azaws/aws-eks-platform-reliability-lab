@@ -22,8 +22,12 @@ def main(argv=None):
     obj = redact(load(safe_root(args.store), args.id))
     context = {"incident": obj["id"], "symptoms": obj.get("symptoms"), "impact": obj.get("impact"),
                "candidate_diagnoses": obj.get("signature_matches", []),
+               "structured_observations": obj.get("observations", [])[:50],
+               "correlations": obj.get("correlations", [])[:25],
                "missing_evidence": obj.get("missing_evidence", []), "next_tests": obj.get("next_tests", []),
-               "sources": [{"source": e.get("source"), "sha256": e.get("sha256")} for e in obj.get("evidence", [])]}
+               "sources": [{"source": e.get("source"), "sha256": e.get("sha256"),
+                            "redacted_excerpt": str(e.get("text", ""))[:1500]}
+                           for e in obj.get("evidence", [])[:10]]}
     print(f"# {args.format}: {args.mode} prompt for {obj['id']}")
     print(TEMPLATES[args.mode])
     print("Constraints: offline-only; no live AWS, Terraform, Kubernetes, Argo CD or PostgreSQL operations.")
