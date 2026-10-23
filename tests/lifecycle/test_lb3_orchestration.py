@@ -1000,3 +1000,152 @@ def test_shutdown_plan_checksum_rejects_symlink(tmp_path):
         lifecycle.sha256_file(
             link, allowed_roots=(evidence,)
         )
+
+
+
+# LB3 shutdown certification evidence-boundary regressions.
+
+def _lb3_readiness_fixture(tmp_path):
+    import hashlib
+    import json
+    from datetime import datetime, timezone
+
+    from foundation import LabConfig
+
+    evidence = tmp_path / "authoritative-private-evidence"
+    evidence.mkdir(mode=0o700)
+
+    backup = evidence / "database.dump.age"
+    backup.write_bytes(b"synthetic-encrypted-backup")
+    backup.chmod(0o600)
+
+    restore = evidence / "restore-test.json"
+    restore_data = {
+        "restore_tested_to_database": True,
+        "database_cleanup_verified": True,
+        "temporary_resources_cleanup_verified": True,
+        "source_identity_verified": True,
+        "database_sha256": hashlib.sha256(
+            backup.read_bytes()
+        ).hexdigest(),
+        "account": "275544662748",
+        "cluster": "eks-platform-reliability-lab",
+    }
+    restore.write_text(json.dumps(restore_data))
+    restore.chmod(0o600)
+
+    plan = {
+        "plan_sha256": "a" * 64,
+        "state_lineage": "offline-lineage",
+        "state_serial": 66,
+    }
+
+    flags = {
+        "safe_to_destroy": True,
+        "backup_verified": True,
+        "restore_tested_to_database": True,
+        "database_cleanup_verified": True,
+        "temporary_resources_cleanup_verified": True,
+        "source_identity_verified": True,
+        "retained_resources_verified": True,
+        "gitops_cleanup_verified": True,
+        "terraform_plan_reviewed": True,
+        "root_autosync_pause_verified": True,
+    }
+
+    readiness = {
+        **flags,
+        "account": "275544662748",
+        "cluster": "eks-platform-reliability-lab",
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "database_backup": str(backup),
+        "database_sha256": restore_data["database_sha256"],
+        "restore_test_report": str(restore),
+        "restore_test_sha256": hashlib.sha256(
+            restore.read_bytes()
+        ).hexdigest(),
+        **plan,
+    }
+
+    record = evidence / "shutdown-readiness.json"
+    record.write_text(json.dumps(readiness))
+    record.chmod(0o600)
+
+    config = LabConfig(
+        evidence_dir=evidence,
+        expected_account_id="275544662748",
+        aws_region="eu-west-1",
+        cluster_name="eks-platform-reliability-lab",
+    )
+
+    return config, plan, readiness, record, backup, restore
+
+
+def test_lb3_shutdown_readiness_accepts_authoritative_evidence(
+    tmp_path
+):
+    import lifecycle
+
+    config, plan, _, _, _, _ = _lb3_readiness_fixture(
+        tmp_path
+    )
+
+    # Offline synthetic data only; no cloud or Terraform calls.
+    assert lifecycle.require_shutdown_readiness(
+        config, plan
+    ) is None
+
+
+@pytest.mark.parametrize("artifact", ["backup", "restore"])
+def test_lb3_shutdown_readiness_rejects_outside_evidence(
+    tmp_path, artifact
+):
+    import lifecycle
+
+    config, plan, readiness, record, backup, restore = (
+        _lb3_readiness_fixture(tmp_path)
+    )
+
+    selected = backup if artifact == "backup" else restore
+    outside = tmp_path / ("outside-" + selected.name)
+    outside.write_bytes(selected.read_bytes())
+    outside.chmod(0o600)
+
+    key = (
+        "database_backup"
+        if artifact == "backup"
+        else "restore_test_report"
+    )
+    readiness[key] = str(outside)
+    record.write_text(json.dumps(readiness))
+
+    with pytest.raises(
+        LifecycleError, match="outside authorized path boundaries"
+    ):
+        lifecycle.require_shutdown_readiness(config, plan)
+
+
+@pytest.mark.parametrize("artifact", ["backup", "restore"])
+def test_lb3_shutdown_readiness_rejects_symlink(
+    tmp_path, artifact
+):
+    import lifecycle
+
+    config, plan, readiness, record, backup, restore = (
+        _lb3_readiness_fixture(tmp_path)
+    )
+
+    selected = backup if artifact == "backup" else restore
+    link = config.evidence_dir / ("link-" + selected.name)
+    link.symlink_to(selected)
+
+    key = (
+        "database_backup"
+        if artifact == "backup"
+        else "restore_test_report"
+    )
+    readiness[key] = str(link)
+    record.write_text(json.dumps(readiness))
+
+    with pytest.raises(LifecycleError, match="Symlink|unavailable"):
+        lifecycle.require_shutdown_readiness(config, plan)
