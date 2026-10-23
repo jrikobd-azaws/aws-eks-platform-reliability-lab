@@ -264,5 +264,33 @@ class DiagnosticsOfflineTests(unittest.TestCase):
         shown = self.command(DIAG, "show", "FULLFLOW")
         self.assertEqual(json.loads(shown.stdout)["state"], "reopened")
 
+    def test_interrupted_update_preserves_original_record(self):
+        from unittest.mock import patch
+        record = core.create(self.root, "INTERRUPTED", "Original preserved", "", "")
+        original = core.load(self.root, "INTERRUPTED")
+        record["symptoms"] = "Modified in interrupted transaction"
+        with patch("os.replace", side_effect=OSError("simulated interruption")):
+            with self.assertRaises(OSError):
+                core.update(self.root, record)
+        retained = core.load(self.root, "INTERRUPTED")
+        self.assertEqual(retained["symptoms"], original["symptoms"])
+        self.assertEqual(list(self.root.glob("*.tmp")), [])
+
+    def test_reject_insecure_record(self):
+        core.create(self.root, "INSECURE", "ordinary", "", "")
+        path = self.root / "INSECURE.json"
+        path.chmod(0o644)
+        with self.assertRaises(ValueError):
+            core.load(self.root, "INSECURE")
+
+    def test_no_remote_service_imports(self):
+        from pathlib import Path
+        for module in (ROOT / "scripts/diagnostics").glob("*.py"):
+            text = module.read_text()
+            for forbidden in ("import boto3", "import requests", "import kubernetes",
+                              "terraform apply", "kubectl delete", "argocd app sync"):
+                with self.subTest(module=module.name, forbidden=forbidden):
+                    self.assertNotIn(forbidden, text)
+
 if __name__ == "__main__":
     unittest.main()
