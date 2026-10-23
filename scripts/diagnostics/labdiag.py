@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from core import safe_root, create, load, update, add_evidence, diagnose, markdown, redact, ALLOWED, utcnow
+from core import safe_root, create, load, update, add_evidence, diagnose, markdown, redact, ALLOWED, utcnow, transition, verify_evidence
 from domain_rules import scenario_rules
 
 def main(argv=None):
@@ -15,7 +15,7 @@ def main(argv=None):
     s = sub.add_parser("show"); s.add_argument("id")
     a = sub.add_parser("evidence"); a.add_argument("id"); a.add_argument("file")
     i = sub.add_parser("investigate"); i.add_argument("id")
-    u = sub.add_parser("update"); u.add_argument("id"); u.add_argument("--state", choices=sorted(ALLOWED), required=True)
+    u = sub.add_parser("update"); u.add_argument("id"); u.add_argument("--state", choices=sorted(ALLOWED), required=True); u.add_argument("--note", help="Verification review note, or administrative closure reason")
     f = sub.add_parser("report"); f.add_argument("id"); f.add_argument("--format", choices=("json", "markdown"), default="markdown")
     r = sub.add_parser("replay"); r.add_argument("fixture", help="offline JSON fixture with id, symptoms, evidence strings")
     cov = sub.add_parser("coverage"); cov.add_argument("--index", default=None, help="authoritative 43-scenario markdown index")
@@ -82,7 +82,12 @@ def main(argv=None):
         elif args.command == "investigate":
             obj = diagnose(obj); obj["state"] = "investigating"; obj["updated_utc"] = utcnow(); update(root, obj)
         elif args.command == "update":
-            obj["state"] = args.state; obj["updated_utc"] = utcnow(); update(root, obj)
+            if args.state == "verification" and args.note:
+                obj["verification_note"] = redact(args.note)
+            obj = transition(obj, args.state, note=args.note if args.state == "closed" else None)
+            update(root, obj)
+    if args.command in ("show", "report"):
+        obj["evidence_verification"] = verify_evidence(obj)
     if args.command == "report" and args.format == "markdown":
         print(markdown(obj), end="")
     else:
