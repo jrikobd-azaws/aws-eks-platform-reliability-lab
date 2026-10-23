@@ -1,0 +1,9 @@
+{
+  "id": "REPLAY-UNKNOWN",
+  "symptoms": "Unexplained intermittent application latency",
+  "impact": "intermittent",
+  "evidence": [
+    "No metrics snapshot retained; evidence insufficient to conclude cause"
+  ],
+  "expected_signatures": []
+}

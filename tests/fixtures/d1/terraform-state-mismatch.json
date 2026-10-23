@@ -1,0 +1,11 @@
+{
+  "id": "REPLAY-TF-STATE",
+  "symptoms": "Shutdown aborted due to state lineage mismatch and state serial mismatch",
+  "impact": "shutdown certification blocked",
+  "evidence": [
+    "Local lifecycle report: state lineage and serial mismatch; no plan applied"
+  ],
+  "expected_signatures": [
+    "TF_STATE"
+  ]
+}
