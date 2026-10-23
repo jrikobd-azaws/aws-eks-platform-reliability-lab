@@ -54,6 +54,8 @@ def redact(value):
 
 def safe_root(path):
     root = Path(path).expanduser().absolute()
+    if any(p.is_symlink() for p in (root, *root.parents)):
+        raise ValueError("symlink in evidence root ancestry refused")
     if root.is_symlink():
         raise ValueError("symlink evidence root refused")
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -104,7 +106,8 @@ def update(root, record):
     if len(payload.encode()) > MAX_BYTES:
         raise ValueError("incident exceeds size limit")
     import os
-    temp = root / (record["id"] + ".tmp")
+    import secrets
+    temp = root / (record["id"] + "-" + secrets.token_hex(8) + ".tmp")
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
@@ -124,8 +127,8 @@ def create(root, name, symptom, impact, component):
     return record
 
 def add_evidence(root, record, filename):
-    evidence = Path(filename).expanduser()
-    if evidence.is_symlink() or not evidence.is_file():
+    evidence = Path(filename).expanduser().absolute()
+    if any(p.is_symlink() for p in (evidence, *evidence.parents)) or not evidence.is_file():
         raise ValueError("missing or symlinked evidence")
     if evidence.stat().st_size > MAX_BYTES:
         raise ValueError("evidence exceeds maximum size")
@@ -149,6 +152,8 @@ def diagnose(record):
         if re.search(pattern, text, re.IGNORECASE):
             hits.append(dict(id=ident, domain=domain, confidence="candidate",
                              evidence_based=True, next_test=test))
+    from domain_rules import text_matches
+    hits.extend(x for x in text_matches(text) if x["id"] not in {h["id"] for h in hits})
     from collectors import collect_saved_json
     structured = []
     for evidence in record.get("evidence", []):
@@ -157,8 +162,10 @@ def diagnose(record):
     record["signature_matches"] = hits
     record["observations"] = [dict(type="pattern_match", signature=h["id"]) for h in hits] + structured[:100]
     record["hypotheses"] = [dict(hypothesis=h["id"], status="unverified") for h in hits]
-    record["missing_evidence"] = ([] if hits else ["No recognised failure signature; gather events, logs and configuration."])
-    record["next_tests"] = [h["next_test"] for h in hits] or [
+    record["missing_evidence"] = [
+        "Candidate signatures do not establish a root cause; independently verify the affected component, timeline and configuration."
+    ] if hits else ["No recognised failure signature; gather events, logs and configuration."]
+    record["next_tests"] = list(dict.fromkeys(h["next_test"] for h in hits)) or [
         "Collect read-only component events, deployment status and recent log excerpts."]
     return record
 
