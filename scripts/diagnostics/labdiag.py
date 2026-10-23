@@ -13,7 +13,7 @@ def main(argv=None):
     sub = p.add_subparsers(dest="command", required=True)
     c = sub.add_parser("create"); c.add_argument("id"); c.add_argument("--symptom", required=True); c.add_argument("--impact", default="unknown"); c.add_argument("--component", default="unknown")
     s = sub.add_parser("show"); s.add_argument("id")
-    a = sub.add_parser("evidence"); a.add_argument("id"); a.add_argument("file")
+    a = sub.add_parser("evidence"); a.add_argument("id"); a.add_argument("file"); a.add_argument("--purpose", choices=("diagnostic", "verification"), default="diagnostic")
     i = sub.add_parser("investigate"); i.add_argument("id")
     u = sub.add_parser("update"); u.add_argument("id"); u.add_argument("--state", choices=sorted(ALLOWED), required=True); u.add_argument("--note", help="Verification review note, or administrative closure reason")
     f = sub.add_parser("report"); f.add_argument("id"); f.add_argument("--format", choices=("json", "markdown"), default="markdown")
@@ -78,7 +78,7 @@ def main(argv=None):
     else:
         obj = load(root, args.id)
         if args.command == "evidence":
-            obj = add_evidence(root, obj, args.file)
+            obj = add_evidence(root, obj, args.file, purpose=args.purpose)
         elif args.command == "investigate":
             obj = diagnose(obj); obj["state"] = "investigating"; obj["updated_utc"] = utcnow(); update(root, obj)
         elif args.command == "update":
