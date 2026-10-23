@@ -49,3 +49,30 @@ The authoritative `scenarios/SCENARIO_INDEX.md` lists 43 stable IDs across six w
 ## Unresolved discovery
 
 Inspect source diffs, tests, deployment documentation and historical private evidence (locally and only with authorisation). Add verified incident timestamps, affected components, actual diagnostic evidence, root-cause confidence, remediation validation and duplicate links. Check GitHub Actions and infrastructure incidents beyond this first set. Do not expose private evidence or secrets.
+
+## Repository-grounded verification: source-level checks
+
+This section verifies **implementation safeguards or source corrections**, not live incident occurrence. References are to the unchanged `main` lifecycle source or historical commits; operational conclusions require the independent private evidence described below.
+
+| Lead | Verified repository evidence | Classification supported by repository | Remaining operational evidence |
+|---|---|---|---|
+| CAND-012 — PostgreSQL TLS | `scripts/lifecycle/recovery.py` defines `_verified_pg_env`, requires readable RDS CA and `PGSSLMODE=verify-full`; commit `af495717a5a0`. | ENGINEERING_DEFECT addressed by source | Saved TLS error and accepted recovery report |
+| CAND-013 — source revision | `scripts/lifecycle/lifecycle.py::backup` records `current_source_revision()` in the manifest; `scripts/lifecycle/orchestrate.py` validates revision against current source. | ENGINEERING_DEFECT / provenance control | Exact mismatch event, archived checkpoint |
+| CAND-014 — rollover | `scripts/lifecycle/lifecycle.py::backup` writes to `_fresh_certification_dir`; commit `d02d1562898f` addresses evidence rollover. | ENGINEERING_DEFECT / lifecycle boundary | Historical interrupted-backup checkpoint |
+| CAND-015 — shutdown plan path | `scripts/lifecycle/lifecycle.py::create_plan` writes saved binary and JSON into the approved evidence root; commit `e5da50f156c1`. | ENGINEERING_DEFECT | Earlier plan-path failure record |
+| CAND-016 — readiness private hashing | `scripts/lifecycle/lifecycle.py::require_shutdown_readiness` hashes the encrypted backup and restore report with explicit `allowed_roots=(config.evidence_dir.resolve(),)`; commit `6ecbee7136cc`. | ENGINEERING_DEFECT corrected and source verified | Original rejected certification attempt and subsequent passed report |
+| CAND-017 — sanitized restore diagnostics | `scripts/lifecycle/labctl.py` provides `blocked_error_message`; commit `7de2e1ad5066`. | ENGINEERING_DEFECT / logging safeguard | Original redacted failure sample |
+| CAND-018 — CRD YAML | Commit `2060684a4321` explicitly addresses CRD YAML serialization. | ENGINEERING_DEFECT candidate, commit corroboration only | Relevant changed code, test and incident records |
+| HIST-007 — Alertmanager | Commit `156f790962d5` declares null receiver. | Owner-reported incident with corroborating remediation commit | Archived Operator/StatefulSet readiness verification |
+| HIST-008 — metrics selector | Commit `ad63bde3e66d` adjusts FastAPI Service labels, while commit `cac0869d03f1` changes monitoring ownership. | Owner-reported incident with multiple independent changes | Saved target health and GitOps application evidence |
+| HIST-004/HIST-005 | Commit `a4dfa2796440` addresses TLS and node-exporter PSA in one change. | Two owner-reported symptoms, shared remediation commit | Saved Pod events and admission violations to show independent failures |
+
+### Inventory checkpoint interpretation
+
+- **11** owner-reported historical cases are *historical leads*. Individual case classification remains evidence-qualified; statements by the project owner are not automatically elevated to observed-log verification.
+- **7** additional Git-commit-backed defects were identified; at least six have direct source-level cross-checks. They are not automatically additional operational incidents.
+- There is potential overlap between historical leads and commit-backed defects. Deduplication must use a stable `incident_id` plus source/evidence references, not commit count.
+- Exact live timelines, impact durations and successful remediation outcomes cannot be independently reconstructed from the public repository alone. These remain explicitly `INSUFFICIENT_EVIDENCE` for operational confirmation until private evidence is inspected.
+- The original **43** planned scenarios remain a separate registry: none should be relabelled as historically completed by D1.
+
+**D1_HISTORICAL_INCIDENT_INVENTORY_COMPLETE** denotes that the bounded initial inventory, cross-references and explicit evidence gaps were recorded; it does **not** certify that all 18 leads are confirmed incidents.
