@@ -45,3 +45,17 @@ Historical operational logs and some private lifecycle evidence live outside Git
 D1 is not a production-ready incident AI agent. Detection currently uses bounded patterns and representative offline structured parsers, not a complete semantic inference engine. AI prompts are generated for human review and may need manual evidence selection. Redaction is best effort; inspect generated material before sharing externally. No autonomous fixes, live collectors, infrastructure mutations or scenario injection are included.
 
 A `D1_IMPLEMENTATION_REVIEW_READY` status means the offline toolkit is demonstrable with passing CI and documented limitations. It does not mean all 43 live troubleshooting scenarios have been executed. The full scenario waves, live validation and publication belong to D2/D3.
+
+## D1 corrective acceptance: operator contracts
+
+### Incident closure
+
+`labdiag update ID --state closed` is **blocked** unless the current state is `verification`, an explicit verification review note was recorded using `update ID --state verification --note "..."`, and every referenced original evidence file is still present with its original SHA-256. Those conditions provide a minimum audit gate; they do not independently establish that the remediation actually worked. The operator is accountable for the verification note and should attach post-remediation evidence. Use `update ID --state closed --note "Reason for administrative closure"` for documented **administrative, unresolved** closure. Never interpret this path as resolution. `reopened` clears closure status.
+
+### Evidence integrity and prompts
+
+`show`, `report`, `investigate` and `labassist` rehash original offline files where applicable. Removed, symlinked or changed sources are `unverifiable` or `changed`, never `verified`; changed excerpts are withheld from AI prompts. Candidate signatures and correlations remain unverified. Redaction handles common credentials, database URI passwords, bearer tokens, nested metadata and multiline private-key blocks but is **best effort**, not a promise to detect every secret syntax. Inspect exported logs and model prompts before sharing.
+
+### Investigation depth and AI-target presets: explicit D1 deferral
+
+`quick`, `standard`, and `deep` are **not implemented D1 CLI profiles**. All D1 investigations use the single deterministic, bounded offline path; unsupported `--profile` requests are rejected by argparse. The `--format {chatgpt,antigravity,warp,generic}` choices currently select target **labels only**, not different AI model instruction presets or external API calls. Meaningful prompt presets and depth-specific evidence budgets are deferred to D2 after independent product and security review. No documentation or acceptance result should imply profiles or per-model reasoning policies exist in D1.
