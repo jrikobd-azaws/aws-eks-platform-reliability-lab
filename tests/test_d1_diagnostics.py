@@ -241,5 +241,28 @@ class DiagnosticsOfflineTests(unittest.TestCase):
         self.assertEqual(sum(x["source_type"] == "source_history" for x in data["incidents"]), 7)
         self.assertFalse(any(x["operational_event_verified"] for x in data["incidents"]))
 
+    def test_end_to_end_incident_and_assistant_workflow(self):
+        created = self.command(DIAG, "create", "FULLFLOW", "--symptom", "New unknown failure", "--impact", "Users affected")
+        self.assertEqual(created.returncode, 0, created.stderr)
+        evidence = self.command(DIAG, "evidence", "FULLFLOW", str(self.evidence))
+        self.assertEqual(evidence.returncode, 0, evidence.stderr)
+        investigated = self.command(DIAG, "investigate", "FULLFLOW")
+        self.assertEqual(investigated.returncode, 0, investigated.stderr)
+        result = json.loads(investigated.stdout)
+        self.assertIn("K8S_OOM", {h["id"] for h in result["signature_matches"]})
+        self.assertTrue(result["next_tests"])
+        for mode in ("investigate", "review", "verify"):
+            prompt = self.command(ASSIST, mode, "FULLFLOW")
+            self.assertEqual(prompt.returncode, 0, prompt.stderr)
+            self.assertIn("K8S_OOM", prompt.stdout)
+        md = self.command(DIAG, "report", "FULLFLOW", "--format", "markdown")
+        self.assertEqual(md.returncode, 0, md.stderr)
+        self.assertIn("Candidate diagnoses", md.stdout)
+        for state in ("verification", "closed", "reopened"):
+            changed = self.command(DIAG, "update", "FULLFLOW", "--state", state)
+            self.assertEqual(changed.returncode, 0, changed.stderr)
+        shown = self.command(DIAG, "show", "FULLFLOW")
+        self.assertEqual(json.loads(shown.stdout)["state"], "reopened")
+
 if __name__ == "__main__":
     unittest.main()
