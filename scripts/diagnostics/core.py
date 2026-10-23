@@ -149,8 +149,13 @@ def diagnose(record):
         if re.search(pattern, text, re.IGNORECASE):
             hits.append(dict(id=ident, domain=domain, confidence="candidate",
                              evidence_based=True, next_test=test))
+    from collectors import collect_saved_json
+    structured = []
+    for evidence in record.get("evidence", []):
+        structured += collect_saved_json(evidence.get("text", ""))
+    structured += collect_saved_json(str(record.get("symptoms", "")))
     record["signature_matches"] = hits
-    record["observations"] = [dict(type="pattern_match", signature=h["id"]) for h in hits]
+    record["observations"] = [dict(type="pattern_match", signature=h["id"]) for h in hits] + structured[:100]
     record["hypotheses"] = [dict(hypothesis=h["id"], status="unverified") for h in hits]
     record["missing_evidence"] = ([] if hits else ["No recognised failure signature; gather events, logs and configuration."])
     record["next_tests"] = [h["next_test"] for h in hits] or [
