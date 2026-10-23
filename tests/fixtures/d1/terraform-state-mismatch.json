@@ -4,5 +4,8 @@
   "impact": "shutdown certification blocked",
   "evidence": [
     "Local lifecycle report: state lineage and serial mismatch; no plan applied"
+  ],
+  "expected_signatures": [
+    "TF_STATE"
   ]
 }
