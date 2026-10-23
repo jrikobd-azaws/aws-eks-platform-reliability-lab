@@ -19,7 +19,20 @@ def main(argv=None):
     f = sub.add_parser("report"); f.add_argument("id"); f.add_argument("--format", choices=("json", "markdown"), default="markdown")
     r = sub.add_parser("replay"); r.add_argument("fixture", help="offline JSON fixture with id, symptoms, evidence strings")
     cov = sub.add_parser("coverage"); cov.add_argument("--index", default=None, help="authoritative 43-scenario markdown index")
+    inv = sub.add_parser("inventory"); inv.add_argument("--registry", default=None, help="versioned historical incident registry")
     args = p.parse_args(argv)
+    if args.command == "inventory":
+        registry = Path(args.registry) if args.registry else Path(__file__).resolve().parents[2] / "scenarios/D1_HISTORICAL_INVENTORY.json"
+        if registry.is_symlink() or not registry.is_file() or registry.stat().st_size > 1_000_000:
+            raise ValueError("invalid offline historical registry")
+        data = json.loads(registry.read_text(encoding="utf-8"))
+        incidents = data.get("incidents")
+        if data.get("schema") != 1 or not isinstance(incidents, list):
+            raise ValueError("invalid historical inventory schema")
+        if len({x["id"] for x in incidents}) != len(incidents):
+            raise ValueError("duplicate historical ID")
+        print(json.dumps(redact({"schema": 1, "count": len(incidents), "incidents": incidents}), indent=2))
+        return 0
     if args.command == "coverage":
         index = Path(args.index) if args.index else Path(__file__).resolve().parents[2] / "scenarios/SCENARIO_INDEX.md"
         import re
