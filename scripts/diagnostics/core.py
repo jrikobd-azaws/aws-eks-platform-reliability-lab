@@ -153,9 +153,60 @@ def add_evidence(root, record, filename):
     update(root, record)
     return record
 
+
+def verify_evidence(record):
+    """Re-hash original local evidence, failing closed on changed or missing files."""
+    checks = []
+    for item in record.get("evidence", []):
+        path = Path(str(item.get("source", "")))
+        status = "unverifiable"
+        try:
+            if (path.is_absolute() and path.is_file() and
+                not any(p.is_symlink() for p in (path, *path.parents)) and
+                path.stat().st_size <= MAX_BYTES):
+                digest = hashlib.sha256()
+                with path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(65536), b""):
+                        digest.update(chunk)
+                status = "verified" if digest.hexdigest() == item.get("sha256") else "changed"
+        except (OSError, ValueError):
+            status = "unverifiable"
+        checks.append({"source": redact(str(path)), "status": status})
+    return checks
+
+
+def transition(record, requested, note=None):
+    if requested not in ALLOWED:
+        raise ValueError("invalid incident state")
+    if requested == "closed":
+        if note is not None:
+            if not note.strip():
+                raise ValueError("administrative closure needs a documented reason")
+            record["closure"] = {"kind": "administrative_unresolved", "note": redact(note)}
+            record["resolution_verified"] = False
+        else:
+            checks = verify_evidence(record)
+            if (record.get("state") != "verification" or not checks or
+                any(x["status"] != "verified" for x in checks) or
+                not record.get("verification_note")):
+                raise ValueError("resolved closure requires verification state, intact evidence and review note")
+            record["closure"] = {"kind": "resolved", "note": redact(record["verification_note"])}
+            record["resolution_verified"] = True
+    if requested == "reopened":
+        record.pop("closure", None)
+        record["resolution_verified"] = False
+    record["state"] = requested
+    record["updated_utc"] = utcnow()
+    return record
+
 def diagnose(record):
     fragments = [str(record.get("symptoms", ""))]
     fragments += [str(e.get("text", "")) for e in record.get("evidence", [])]
+    evidence_checks = verify_evidence(record)
+    record["evidence_verification"] = evidence_checks
+    fragments = [str(record.get("symptoms", ""))]
+    fragments += [str(item.get("text", "")) for item, result in zip(record.get("evidence", []), evidence_checks)
+                  if result["status"] == "verified"]
     text = "\n".join(fragments)
     hits = []
     for ident, pattern, domain, test in SIGNATURES:
@@ -166,8 +217,9 @@ def diagnose(record):
     hits.extend(x for x in text_matches(text) if x["id"] not in {h["id"] for h in hits})
     from collectors import collect_saved_json
     structured = []
-    for evidence in record.get("evidence", []):
-        structured += collect_saved_json(evidence.get("text", ""))
+    for evidence, checked in zip(record.get("evidence", []), evidence_checks):
+        if checked["status"] == "verified":
+            structured += collect_saved_json(evidence.get("text", ""))
     structured += collect_saved_json(str(record.get("symptoms", "")))
     record["signature_matches"] = hits
     record["observations"] = [dict(type="pattern_match", signature=h["id"]) for h in hits] + structured[:100]
@@ -190,6 +242,8 @@ def diagnose(record):
     record["missing_evidence"] = [
         "Candidate signatures do not establish a root cause; independently verify the affected component, timeline and configuration."
     ] if hits else ["No recognised failure signature; gather events, logs and configuration."]
+    if any(x["status"] != "verified" for x in evidence_checks):
+        record["missing_evidence"].append("Original saved evidence changed or missing; independent verification failed.")
     record["next_tests"] = list(dict.fromkeys(h["next_test"] for h in hits)) or [
         "Collect read-only component events, deployment status and recent log excerpts."]
     return record
