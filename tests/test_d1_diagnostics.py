@@ -117,5 +117,60 @@ class DiagnosticsOfflineTests(unittest.TestCase):
         # Size-bounded walker truncates large arrays and never loops indefinitely.
         self.assertEqual(collect_saved_json(huge), [])
 
+    def test_replay_all_repository_fixtures(self):
+        for fixture in sorted((ROOT / "tests/fixtures/d1").glob("*.json")):
+            with self.subTest(fixture=fixture.name):
+                result = subprocess.run([sys.executable, str(DIAG), "replay", str(fixture)],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                result_data = json.loads(result.stdout)
+                self.assertTrue(all(h["confidence"] == "candidate" for h in result_data["signature_matches"]))
+
+    def test_replay_wrong_expectation_blocks(self):
+        fixture = Path(self.tmp.name) / "invalid.json"
+        fixture.write_text(json.dumps({"id": "WRONG", "symptoms": "unknown", "evidence": [],
+                                       "expected_signatures": ["PG_SCHEMA_MISSING"]}))
+        result = subprocess.run([sys.executable, str(DIAG), "replay", str(fixture)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("replay expectation failed", result.stderr)
+
+    def test_coverage_maps_rule_without_claiming_live_validation(self):
+        result = subprocess.run([sys.executable, str(DIAG), "coverage"],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {row["id"]: row for row in json.loads(result.stdout)["coverage"]}
+        self.assertTrue(rows["K8S-02"]["detection_rule_available"])
+        self.assertFalse(rows["K8S-02"]["offline_regression_passed"])
+        self.assertFalse(rows["K8S-02"]["live_validated"])
+
+    def test_structured_event_correlation(self):
+        payload = {"items": [{"reason": "FailedScheduling", "message": "Insufficient cpu"}]}
+        rec = core.create(self.root, "SCHED", "pod remains pending", "", "")
+        path = Path(self.tmp.name) / "pod-event.json"
+        path.write_text(json.dumps(payload))
+        core.add_evidence(self.root, rec, path)
+        diagnosed = core.diagnose(core.load(self.root, "SCHED"))
+        self.assertIn("K8S_SCHEDULING", {h["id"] for h in diagnosed["signature_matches"]})
+        self.assertIn("kubernetes_scheduling", {o["type"] for o in diagnosed["observations"]})
+        self.assertTrue(diagnosed["missing_evidence"])
+
+    def test_oversize_input_rejected(self):
+        record = core.create(self.root, "SIZE", "unknown", "", "")
+        path = Path(self.tmp.name) / "large.log"
+        path.write_text("x" * 1_000_001)
+        with self.assertRaises(ValueError):
+            core.add_evidence(self.root, record, path)
+
+    def test_symlinked_evidence_parent_rejected(self):
+        real = Path(self.tmp.name) / "real"
+        real.mkdir()
+        (real / "log.txt").write_text("private")
+        symlink = Path(self.tmp.name) / "alias"
+        symlink.symlink_to(real, target_is_directory=True)
+        record = core.create(self.root, "LINK-PARENT", "unknown", "", "")
+        with self.assertRaises(ValueError):
+            core.add_evidence(self.root, record, symlink / "log.txt")
+
 if __name__ == "__main__":
     unittest.main()
