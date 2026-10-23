@@ -1,0 +1,276 @@
+{
+  "schema": 1,
+  "status": "DISCOVERY_CHECKPOINT_EVIDENCE_QUALIFIED",
+  "base_revision": "0bd7e389e674d5f2ca0f5efb518a01f99fec8829",
+  "note": "Owner reports are leads; commits support defects but not operational occurrence. Live incident root cause remains unverified without historical evidence.",
+  "incidents": [
+    {
+      "id": "HIST-001",
+      "title": "PostgreSQL registration HTTP 500; missing Alembic schema",
+      "classification": "INSUFFICIENT_EVIDENCE",
+      "source_type": "owner_report",
+      "scenario_ids": [
+        "INC-02"
+      ],
+      "commits": [],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "HIST-002",
+      "title": "Argo AppProject denied Prometheus Community Helm repository",
+      "classification": "INSUFFICIENT_EVIDENCE",
+      "source_type": "owner_report",
+      "scenario_ids": [
+        "ARGO-03",
+        "ARGO-05"
+      ],
+      "commits": [],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "HIST-003",
+      "title": "Six Prometheus Operator CRDs exceeded annotation size",
+      "classification": "INSUFFICIENT_EVIDENCE",
+      "source_type": "owner_report",
+      "scenario_ids": [
+        "ARGO-05",
+        "HELM-03"
+      ],
+      "commits": [
+        "6269558170ab34a89acd0d7ae0d1c4d1e66e5cfe"
+      ],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "HIST-004",
+      "title": "Prometheus Operator webhook TLS Secret mismatch",
+      "classification": "INSUFFICIENT_EVIDENCE",
+      "source_type": "owner_report",
+      "scenario_ids": [
+        "HELM-01"
+      ],
+      "commits": [
+        "a4dfa2796440ec39f7a372b9b5a4f401fd7467bb"
+      ],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "HIST-005",
+      "title": "node-exporter denied by Pod Security Admission",
+      "classification": "INSUFFICIENT_EVIDENCE",
+      "source_type": "owner_report",
+      "scenario_ids": [
+        "K8S-03",
+        "HELM-01"
+      ],
+      "commits": [
+        "a4dfa2796440ec39f7a372b9b5a4f401fd7467bb"
+      ],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "HIST-006",
+      "title": "Argo CD controller OOMKilled at memory limit",
+      "classification": "INSUFFICIENT_EVIDENCE",
+      "source_type": "owner_report",
+      "scenario_ids": [
+        "K8S-04",
+        "ARGO-02"
+      ],
+      "commits": [],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "HIST-007",
+      "title": "Alertmanager StatefulSet absent; undefined null receiver",
+      "classification": "INSUFFICIENT_EVIDENCE",
+      "source_type": "owner_report",
+      "scenario_ids": [
+        "HELM-01",
+        "ARGO-02"
+      ],
+      "commits": [
+        "156f790962d531152b31b5d1b7a8df3c63e38e56"
+      ],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "HIST-008",
+      "title": "FastAPI Prometheus target undiscovered due to Service selector",
+      "classification": "INSUFFICIENT_EVIDENCE",
+      "source_type": "owner_report",
+      "scenario_ids": [
+        "K8S-06",
+        "ARGO-01"
+      ],
+      "commits": [
+        "ad63bde3e66d1895b16d6cebe710e9fef619d45a"
+      ],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "HIST-009",
+      "title": "Root GitOps AppProject rejected ServiceMonitor ownership",
+      "classification": "INSUFFICIENT_EVIDENCE",
+      "source_type": "owner_report",
+      "scenario_ids": [
+        "ARGO-03",
+        "ARGO-05"
+      ],
+      "commits": [
+        "42324a0de363ea645cbd52934e2f4aec27ed2281"
+      ],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "HIST-010",
+      "title": "OutOfSync due to eight stale node-exporter resources",
+      "classification": "INSUFFICIENT_EVIDENCE",
+      "source_type": "owner_report",
+      "scenario_ids": [
+        "ARGO-01"
+      ],
+      "commits": [],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "HIST-011",
+      "title": "Generated automation assumed incorrect mutable runtime contracts",
+      "classification": "INSUFFICIENT_EVIDENCE",
+      "source_type": "owner_report",
+      "scenario_ids": [
+        "TF-02",
+        "HELM-01"
+      ],
+      "commits": [],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "CAND-012",
+      "title": "Native PostgreSQL TLS trust verification",
+      "classification": "ENGINEERING_DEFECT",
+      "source_type": "source_history",
+      "scenario_ids": [
+        "INC-02"
+      ],
+      "commits": [
+        "af495717a5a073d0cf84d798fdded9e73af46ce9"
+      ],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "CAND-013",
+      "title": "Backup manifest source provenance validation",
+      "classification": "ENGINEERING_DEFECT",
+      "source_type": "source_history",
+      "scenario_ids": [
+        "TF-06"
+      ],
+      "commits": [
+        "355199fbef1812eabb74e19142bbb202563f0d0c"
+      ],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "CAND-014",
+      "title": "Failed backup rollover evidence path",
+      "classification": "ENGINEERING_DEFECT",
+      "source_type": "source_history",
+      "scenario_ids": [
+        "TF-06"
+      ],
+      "commits": [
+        "d02d1562898f2f0d2160defbb81e81840e5cd458"
+      ],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "CAND-015",
+      "title": "Shutdown plan evidence boundary alignment",
+      "classification": "ENGINEERING_DEFECT",
+      "source_type": "source_history",
+      "scenario_ids": [
+        "TF-07"
+      ],
+      "commits": [
+        "e5da50f156c1221510d40604a64318bb83710c05"
+      ],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "CAND-016",
+      "title": "Readiness SHA256 validation private path boundary",
+      "classification": "ENGINEERING_DEFECT",
+      "source_type": "source_history",
+      "scenario_ids": [
+        "TF-06"
+      ],
+      "commits": [
+        "6ecbee7136cc7c7119f64e68cc219af7579d7d62"
+      ],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "CAND-017",
+      "title": "Sanitized lifecycle restore diagnostics",
+      "classification": "ENGINEERING_DEFECT",
+      "source_type": "source_history",
+      "scenario_ids": [
+        "INC-02"
+      ],
+      "commits": [
+        "7de2e1ad5066cf9afdd228d8a5edc0701735e9ee"
+      ],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    },
+    {
+      "id": "CAND-018",
+      "title": "Prometheus CRD YAML serialization",
+      "classification": "ENGINEERING_DEFECT",
+      "source_type": "source_history",
+      "scenario_ids": [
+        "HELM-03"
+      ],
+      "commits": [
+        "2060684a43218260b11ade74eb60643be834ea24"
+      ],
+      "root_cause_confidence": "unverified",
+      "operational_event_verified": false,
+      "live_validated": false
+    }
+  ]
+}
