@@ -136,7 +136,9 @@ def create(root, name, symptom, impact, component):
     save(root, record)
     return record
 
-def add_evidence(root, record, filename):
+def add_evidence(root, record, filename, purpose="diagnostic"):
+    if purpose not in ("diagnostic", "verification"):
+        raise ValueError("unsupported evidence purpose")
     evidence = Path(filename).expanduser().absolute()
     if any(p.is_symlink() for p in (evidence, *evidence.parents)) or not evidence.is_file():
         raise ValueError("missing or symlinked evidence")
@@ -147,7 +149,7 @@ def add_evidence(root, record, filename):
         text = blob.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("only UTF-8 offline evidence is accepted") from exc
-    record["evidence"].append(dict(source=str(evidence.resolve()), sha256=hashlib.sha256(blob).hexdigest(),
+    record["evidence"].append(dict(source=str(evidence.resolve()), purpose=purpose, sha256=hashlib.sha256(blob).hexdigest(),
                                   collected_utc=utcnow(), text=redact(text)))
     record["updated_utc"] = utcnow()
     update(root, record)
@@ -186,7 +188,9 @@ def transition(record, requested, note=None):
             record["resolution_verified"] = False
         else:
             checks = verify_evidence(record)
-            if (record.get("state") != "verification" or not checks or
+            verified_recovery = any(item.get("purpose") == "verification" and checks[i]["status"] == "verified"
+                                    for i, item in enumerate(record.get("evidence", [])))
+            if (record.get("state") != "verification" or not verified_recovery or not checks or
                 any(x["status"] != "verified" for x in checks) or
                 not record.get("verification_note")):
                 raise ValueError("resolved closure requires verification state, intact evidence and review note")
