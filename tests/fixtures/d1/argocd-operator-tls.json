@@ -1,0 +1,8 @@
+{
+  "id": "REPLAY-PROM-TLS",
+  "symptoms": "Prometheus Operator ContainerCreating",
+  "impact": "monitoring unavailable",
+  "evidence": [
+    "Pod event: failed mounting Secret observability-admission; secret not found"
+  ]
+}
