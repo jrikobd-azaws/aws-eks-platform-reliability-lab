@@ -172,5 +172,58 @@ class DiagnosticsOfflineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             core.add_evidence(self.root, record, symlink / "log.txt")
 
+    def test_structured_domains_from_saved_json(self):
+        from collectors import collect_saved_json
+        snapshots = [
+            ({"status": {"sync": {"status": "OutOfSync"}, "health": {"status": "Degraded"}}}, "argocd_state"),
+            ({"alerts": [{"state": "firing", "labels": {"alertname": "BackendUnavailable"}}]}, "prometheus_alert_firing"),
+            ({"changes": [{"change": {"actions": ["delete"]}, "address": "aws_instance.test"}]}, "terraform_deletion"),
+            ({"stages": {"backup": {"status": "failed", "result": "report.json"}}}, "lifecycle_stage_unresolved"),
+            ({"report": {"schema_and_permissions_verified": False}}, "postgresql_schema_unverified"),
+            ({"jobs": [{"conclusion": "failure", "steps": []}]}, "github_actions_failed_job"),
+        ]
+        for payload, expected in snapshots:
+            with self.subTest(domain=expected):
+                observed = collect_saved_json(json.dumps(payload))
+                self.assertIn(expected, {x["type"] for x in observed})
+
+    def test_core_domain_signature_matrix(self):
+        from domain_rules import text_matches
+        fixtures = {
+            "K8S_IMAGE_PULL": "Warning: ImagePullBackOff",
+            "K8S_SCHEDULING": "FailedScheduling: Insufficient cpu",
+            "K8S_PROBE": "Readiness probe failed",
+            "K8S_STORAGE": "Warning FailedMount",
+            "K8S_RBAC": "forbidden: serviceaccount cannot list pods resource",
+            "EKS_CNI": "FailedCreatePodSandBox",
+            "EKS_IAM": "AssumeRoleWithWebIdentity denied",
+            "HELM_RELEASE": "UPGRADE FAILED",
+            "TF_LOCK": "Error acquiring the state lock",
+            "TF_PROVIDER": "Inconsistent dependency lock file",
+            "PG_CONNECT": "could not connect to server",
+            "RECOVERY_CHECKPOINT": "interrupted lifecycle checkpoint",
+            "GITHUB_ACTIONS": "Process completed with exit code 1",
+        }
+        for expected, symptom in fixtures.items():
+            with self.subTest(signature=expected):
+                result = text_matches(symptom)
+                self.assertIn(expected, {r["id"] for r in result})
+                self.assertTrue(all(r["confidence"] == "candidate" for r in result))
+
+    def test_all_assistant_modes_and_formats(self):
+        core.create(self.root, "PROMPT", "Unexplained latency", "slow requests", "app")
+        for mode in ("investigate", "review", "verify"):
+            for fmt in ("chatgpt", "antigravity", "warp", "generic"):
+                with self.subTest(mode=mode, format=fmt):
+                    result = self.command(ASSIST, mode, "PROMPT", "--format", fmt)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("BEGIN UNTRUSTED INCIDENT DATA", result.stdout)
+                    self.assertIn("offline-only", result.stdout)
+
+    def test_protected_store_mode(self):
+        self.assertEqual(self.root.stat().st_mode & 0o777, 0o700)
+        core.create(self.root, "PERMISSIONS", "unknown", "", "")
+        self.assertEqual((self.root / "PERMISSIONS.json").stat().st_mode & 0o777, 0o600)
+
 if __name__ == "__main__":
     unittest.main()
