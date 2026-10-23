@@ -98,5 +98,24 @@ class DiagnosticsOfflineTests(unittest.TestCase):
         self.assertEqual(data["scenario_count"], 43)
         self.assertFalse(any(x["live_validated"] for x in data["coverage"]))
 
+    def test_structured_oom_observation(self):
+        from collectors import collect_saved_json
+        data = json.dumps({"status": {"containerStatuses": [{"lastState": {"terminated": {"reason": "OOMKilled", "exitCode": 137}}}]}})
+        observations = collect_saved_json(data)
+        self.assertTrue(any(x["type"] == "kubernetes_termination" for x in observations))
+
+    def test_terraform_replacement_observation(self):
+        from collectors import collect_saved_json
+        data = json.dumps({"resource_changes": [{"address": "aws_eks_cluster.lab",
+                     "change": {"actions": ["delete", "create"]}}]})
+        self.assertTrue(any(x["type"] == "terraform_replacement"
+                            for x in collect_saved_json(data)))
+
+    def test_structured_json_node_limit(self):
+        from collectors import collect_saved_json
+        huge = json.dumps({"items": [{"k": {}} for _ in range(2100)]})
+        # Size-bounded walker truncates large arrays and never loops indefinitely.
+        self.assertEqual(collect_saved_json(huge), [])
+
 if __name__ == "__main__":
     unittest.main()
