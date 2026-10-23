@@ -6,6 +6,7 @@ The D1 CLIs are independent of native `labctl`; do not modify or invoke the acce
 
 ```bash
 python3 scripts/diagnostics/labdiag.py coverage > /tmp/labdiag-coverage.json
+python3 scripts/diagnostics/labdiag.py inventory
 python3 scripts/diagnostics/labdiag.py create CASE-001 --symptom "registration failed UndefinedTable" --impact "sign-up unavailable" --component postgresql
 python3 scripts/diagnostics/labdiag.py evidence CASE-001 ./approved-redacted-events.log
 python3 scripts/diagnostics/labdiag.py investigate CASE-001
@@ -26,14 +27,21 @@ No external processes for analysis; no network access; no cloud writes. Evidence
 
 `coverage` registers the authoritative original 43 scenarios from `scenarios/SCENARIO_INDEX.md` and exports six flags (registered/collector/rule/offline-test/live-validation/docs). This initial implementation conservatively reports collector/rule/tests/live/docs as false until scenario-specific evidence is independently established. Generic regex detection is not equivalent to full scenario coverage. The historical leads, separate from scenarios, are recorded in `docs/diagnostics/D1-HISTORICAL-INCIDENT-INVENTORY.md`.
 
-## Known limitations — must resolve before D1 acceptance
+## Verified D1 implementation and evidence boundaries
 
-- The historical inventory is a sourced **discovery checkpoint**, not a fully reconciled evidence-backed inventory. Seven additional Git-history leads need detailed validation; no operational incident count is claimed beyond 11 owner-reported cases.
-- No verified mapping yet of all discovered incidents to source-level fixes and end-to-end operational artefacts.
-- Generic text collector only; no domain-specific structured Kubernetes/Prometheus/Terraform/GitOps JSON analysers yet.
-- Regex signatures produce candidates without multi-source correlation or exclusion tests.
-- No migration/version upgrade of stored evidence records, replay goldens, or full end-to-end demo accepted yet.
-- Security tests and full repository regression/Gitleaks have **not** been executed in the GitHub-connected tool environment. Execute them in a clean WSL worktree before PR publication.
-- No AWS mutation, live validation or infrastructure testing is included.
+- Shared versioned incident JSON schema with private 0700 store and 0600 record files.
+- Incident create, show, update, investigate, reopen/close, evidence collection, sanitised JSON/Markdown reporting, replay, historical inventory and 43-scenario coverage.
+- Text and bounded structured-JSON offline collectors across Kubernetes, AWS/EKS/IAM signals, Helm/Argo CD, Prometheus/Alertmanager, PostgreSQL, Terraform, CI and lifecycle metadata. Candidate signal patterns are non-causal; additional cross-layer correlations remain explicitly unverified.
+- Three `labassist` prompt modes for ChatGPT, Antigravity, Warp and generic models; supplied evidence is marked untrusted and only bounded redacted excerpts are included.
+- Four controlled synthetic replay fixtures with expected-signature assertions. A failing expected replay signature produces an explicit non-zero exit.
+- Historical registry: 11 owner-reported cases and seven commit-backed defect candidates. Evidence-qualified classifications and source cross-references are in `D1-HISTORICAL-INCIDENT-INVENTORY.md`, and the machine-readable register is `scenarios/D1_HISTORICAL_INVENTORY.json`.
+- Full 43-ID matrix: `D1-SCENARIO-COVERAGE.md`. All 43 are registered; 28 have a candidate textual signal-rule link. No scenario-specific complete regression or live validation is claimed.
+- Dedicated GitHub Actions D1 tests and repository `safety-checks` (which includes Gitleaks and existing offline checks). Inspect actual latest commit checks before accepting PR.
 
-**State:** D1_PARTIAL_IMPLEMENTATION; not `DIAGNOSTICS_D1_IMPLEMENTATION_REVIEW_READY` or `DIAGNOSTICS_D1_LABDIAG_LABASSIST_OFFLINE_ACCEPTED`.
+## Known limitations and D2/D3 handoff
+
+Historical operational logs and some private lifecycle evidence live outside GitHub. They were not fetched, changed or disclosed for D1. As a result, incident occurrence and root-cause confidence are not automatically certified merely by an owner report or fix commit. Candidate defects may overlap owner-reported cases and must remain separate until evidence establishes uniqueness.
+
+D1 is not a production-ready incident AI agent. Detection currently uses bounded patterns and representative offline structured parsers, not a complete semantic inference engine. AI prompts are generated for human review and may need manual evidence selection. Redaction is best effort; inspect generated material before sharing externally. No autonomous fixes, live collectors, infrastructure mutations or scenario injection are included.
+
+A `D1_IMPLEMENTATION_REVIEW_READY` status means the offline toolkit is demonstrable with passing CI and documented limitations. It does not mean all 43 live troubleshooting scenarios have been executed. The full scenario waves, live validation and publication belong to D2/D3.
