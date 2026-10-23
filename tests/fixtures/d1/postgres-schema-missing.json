@@ -1,0 +1,8 @@
+{
+  "id": "REPLAY-PG-SCHEMA",
+  "symptoms": "Registration returned HTTP 500 with PostgreSQL UndefinedTable relation users does not exist",
+  "impact": "registration unavailable",
+  "evidence": [
+    "Saved application log: UndefinedTable relation users does not exist; Alembic schema not initialised"
+  ]
+}
