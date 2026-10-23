@@ -540,3 +540,128 @@ def test_stage3_reconciliation_requires_live_readiness(harness):
     assert result['action_replayed'] is False
     assert ctl._load()['stages']['stage3_application']['status'] == 'passed'
     assert 'stage3' not in adapter.calls
+
+
+# PR32 final secure Argo CD session integration tests.
+
+def _mock_secure_stage3(monkeypatch, tmp_path, *, auth_fails=False):
+    """No network calls; emulate the native verified session contract."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    import bootstrap
+    import recover_platform
+    from orchestrate import NativeAdapter
+
+    observed = []
+
+    class FakeBootstrap:
+        def __init__(self, config):
+            self.verified_server = None
+            self._session_token = None
+
+        @contextmanager
+        def argocd_session(self):
+            observed.append("session_enter")
+
+            if auth_fails:
+                raise LifecycleError(
+                    "ARGOCD_AUTHENTICATION_FAILED: verified session unavailable"
+                )
+
+            self.verified_server = "127.0.0.1:18080"
+            self._session_token = "offline-test-token"
+
+            try:
+                yield self.verified_server
+            finally:
+                self._session_token = None
+                observed.append("session_exit")
+
+    class FakePlatformRecovery:
+        def __init__(self, config, checkpoint, bootstrap=None):
+            self.bootstrap = bootstrap
+            self.argocd_server = None
+
+        def verify_identity(self, *, update_kubeconfig=True):
+            assert update_kubeconfig is False
+            observed.append("identity_verified")
+
+        def _assert_session(self):
+            assert self.bootstrap is not None
+            assert self.bootstrap.verified_server == "127.0.0.1:18080"
+            assert self.bootstrap._session_token == "offline-test-token"
+            assert self.argocd_server == self.bootstrap.verified_server
+
+        def stage3_application_ready(self):
+            self._assert_session()
+            observed.append("stage3_readiness")
+            return True
+
+        def restore_stage3_application(self):
+            self._assert_session()
+            observed.append("stage3_sync")
+
+        def run_stage(self, stage, ready, action):
+            assert stage == "stage3_application"
+            self._assert_session()
+            observed.append("stage_started")
+            assert ready()
+            action()
+            assert ready()
+
+    monkeypatch.setattr(
+        bootstrap, "RecoveryBootstrap", FakeBootstrap
+    )
+    monkeypatch.setattr(
+        recover_platform, "PlatformRecovery", FakePlatformRecovery
+    )
+
+    config = SimpleNamespace(evidence_dir=tmp_path)
+    return NativeAdapter(config), observed
+
+
+def test_native_stage3_authenticated_session_propagation(
+    monkeypatch, tmp_path
+):
+    adapter, observed = _mock_secure_stage3(
+        monkeypatch, tmp_path
+    )
+
+    adapter.restore_stage3()
+
+    assert observed.index("session_enter") < observed.index("stage3_sync")
+    assert observed.index("stage3_sync") < observed.index("session_exit")
+    assert observed.count("stage3_sync") == 1
+    assert observed[-1] == "session_exit"
+
+
+def test_native_stage3_readiness_uses_verified_session(
+    monkeypatch, tmp_path
+):
+    adapter, observed = _mock_secure_stage3(
+        monkeypatch, tmp_path
+    )
+
+    assert adapter.stage3_ready() is True
+
+    assert "session_enter" in observed
+    assert "stage3_readiness" in observed
+    assert "stage3_sync" not in observed
+    assert observed[-1] == "session_exit"
+
+
+def test_native_stage3_authentication_failure_blocks_sync(
+    monkeypatch, tmp_path
+):
+    adapter, observed = _mock_secure_stage3(
+        monkeypatch, tmp_path, auth_fails=True
+    )
+
+    with pytest.raises(
+        LifecycleError,
+        match="ARGOCD_AUTHENTICATION_FAILED"
+    ):
+        adapter.restore_stage3()
+
+    assert "stage3_sync" not in observed
+    assert "stage_started" not in observed

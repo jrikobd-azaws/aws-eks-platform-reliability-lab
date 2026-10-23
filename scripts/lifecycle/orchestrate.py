@@ -9,6 +9,7 @@ import json
 import hashlib
 import re
 from dataclasses import dataclass
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -205,35 +206,60 @@ class NativeAdapter:
         from recover_platform import validate_recovered_database
         return bool(validate_recovered_database(self.config))
 
-    def stage3_ready(self) -> bool:
+    @contextmanager
+    def _verified_stage3_session(self):
+        """Provide the native verified Argo CD session to Stage 3."""
+        from bootstrap import RecoveryBootstrap
         from foundation import CheckpointStore
         from recover_platform import PlatformRecovery
+
+        bootstrap = RecoveryBootstrap(self.config)
+
         manager = PlatformRecovery(
             self.config,
             CheckpointStore(
-                self.config.evidence_dir / "python-platform-recovery-checkpoint.json"
+                self.config.evidence_dir
+                / "python-platform-recovery-checkpoint.json"
             ),
+            bootstrap=bootstrap,
         )
+
         manager.verify_identity(update_kubeconfig=False)
-        return bool(manager.stage3_application_ready())
+
+        with bootstrap.argocd_session() as verified_server:
+            if (
+                not verified_server
+                or bootstrap.verified_server != verified_server
+            ):
+                raise LifecycleError(
+                    "Verified Argo CD session unavailable"
+                )
+
+            manager.argocd_server = verified_server
+
+            try:
+                yield manager
+            finally:
+                manager.argocd_server = None
+
+    def stage3_ready(self) -> bool:
+        """Verify Stage 3 within the authenticated session."""
+        with self._verified_stage3_session() as manager:
+            return bool(manager.stage3_application_ready())
 
     def restore_stage3(self) -> None:
-        from foundation import CheckpointStore
-        from recover_platform import PlatformRecovery
-        manager = PlatformRecovery(
-            self.config,
-            CheckpointStore(
-                self.config.evidence_dir / "python-platform-recovery-checkpoint.json"
-            ),
-        )
-        manager.verify_identity(update_kubeconfig=False)
-        manager.run_stage(
-            "stage3_application",
-            manager.stage3_application_ready,
-            manager.restore_stage3_application,
-        )
-        if not manager.stage3_application_ready():
-            raise LifecycleError("Stage 3 restoration not independently verified")
+        """Run approved Stage 3 recovery in the verified session."""
+        with self._verified_stage3_session() as manager:
+            manager.run_stage(
+                "stage3_application",
+                manager.stage3_application_ready,
+                manager.restore_stage3_application,
+            )
+
+            if not manager.stage3_application_ready():
+                raise LifecycleError(
+                    "Stage 3 restoration not independently verified"
+                )
 
     def verify_final(self) -> None:
         """Read-only final verification; no implicit Stage 3 deployment."""
