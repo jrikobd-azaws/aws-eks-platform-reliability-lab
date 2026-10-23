@@ -488,12 +488,18 @@ def require_shutdown_readiness(config, plan):
             "Shutdown blocked: backup or restore evidence unavailable"
         )
 
-    if sha256_file(backup) != data.get("database_sha256"):
+    if sha256_file(
+        backup,
+        allowed_roots=(config.evidence_dir.resolve(),),
+    ) != data.get("database_sha256"):
         raise LifecycleError(
             "Shutdown blocked: encrypted backup checksum mismatch"
         )
 
-    if sha256_file(restore) != data.get("restore_test_sha256"):
+    if sha256_file(
+        restore,
+        allowed_roots=(config.evidence_dir.resolve(),),
+    ) != data.get("restore_test_sha256"):
         raise LifecycleError(
             "Shutdown blocked: restore evidence checksum mismatch"
         )
