@@ -492,6 +492,17 @@ def main():
     parser.add_argument('--report', help='Saved private plan report or recovery manifest')
     parser.add_argument('--confirm', help='Explicit account-specific approval')
 
+    # LB3 safe-by-default command family. All execution approvals are separate.
+    parser.add_argument('--lb3-phase', choices=('preflight', 'prepare', 'execute'), default='preflight')
+    parser.add_argument('--manifest', help='Explicit approved recovery manifest for restore')
+    parser.add_argument('--backup-approval', help='Explicit live backup authorisation')
+    parser.add_argument('--restore-test-approval', help='Explicit isolated restore-test authorisation')
+    parser.add_argument('--certification-approval', help='Explicit certification authorisation')
+    parser.add_argument('--shutdown-approval', help='Explicit selective shutdown authorisation')
+    parser.add_argument('--rebuild-approval', help='Explicit infrastructure rebuild authorisation')
+    parser.add_argument('--database-approval', help='Explicit database restoration authorisation')
+    parser.add_argument('--gitops-approval', help='Explicit selective GitOps authorisation')
+
     parser.add_argument(
         "--deploy-stage",
         default="preflight",
@@ -532,6 +543,7 @@ def main():
             "verify-frontend",
             "backup",
             "shutdown",
+            "restore",
             "resume",
             "deploy",
             "native-backup",
@@ -566,11 +578,33 @@ def main():
         python_resume(execute=args.execute)
     elif args.command == "backup":
         python_backup()
-    elif args.command == "shutdown":
-        if args.plan:
-            python_shutdown_plan()
+    elif args.command in ("shutdown", "restore"):
+        from foundation import LabConfig
+        from orchestrate import OneCommandLifecycle, OperatorApprovals
+        coordinator = OneCommandLifecycle(LabConfig.from_environment())
+        approvals = OperatorApprovals(
+            backup=args.backup_approval,
+            restore_test=args.restore_test_approval,
+            certification=args.certification_approval,
+            shutdown=args.shutdown_approval,
+            rebuild=args.rebuild_approval,
+            database=args.database_approval,
+            gitops=args.gitops_approval,
+        )
+        if args.plan and args.lb3_phase != 'preflight':
+            raise RuntimeError('--plan cannot bypass LB3 phase boundaries')
+        if args.command == "shutdown":
+            result = coordinator.shutdown(
+                phase=args.lb3_phase, tfvars=args.tfvars,
+                report=args.report, approvals=approvals,
+            )
         else:
-            python_shutdown_execute()
+            result = coordinator.restore(
+                phase=args.lb3_phase, tfvars=args.tfvars,
+                report=args.report, manifest=args.manifest,
+                approvals=approvals,
+            )
+        print(json.dumps(result, indent=2))
     elif args.command == "verify":
         verify()
     elif args.command == "verify-app":

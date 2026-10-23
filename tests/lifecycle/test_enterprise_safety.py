@@ -165,7 +165,7 @@ def test_cli_error_does_not_expose_exception_secrets():
 
     message = blocked_error_message(error)
 
-    assert message.startswith("BLOCKED: RuntimeError")
+    assert message.startswith("BLOCKED: stage=lifecycle; category=RuntimeError;")
     assert secret not in message
     assert "password=" not in message
     assert str(error) not in message
