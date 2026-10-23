@@ -67,8 +67,9 @@ def main(argv=None):
                 raise ValueError("expected_signatures must be a list of strings")
             detected = {h["id"] for h in result["signature_matches"]}
             missing = set(expected) - detected
-            if missing:
-                raise ValueError("replay expectation failed: " + ", ".join(sorted(missing)))
+            unexpected = detected - set(expected)
+            if missing or unexpected:
+                raise ValueError("replay expectation failed: missing=" + ",".join(sorted(missing)) + "; unexpected=" + ",".join(sorted(unexpected)))
         print(json.dumps(result, indent=2))
         return 0
     root = safe_root(args.store)
