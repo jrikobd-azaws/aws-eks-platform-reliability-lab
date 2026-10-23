@@ -227,6 +227,7 @@ def test_rebuild_execute_accepts_checked_private_tfvars_outside_repo(tmp_path, m
         expected_account_id="275544662748", aws_region="eu-west-1",
         cluster_name="lab",
     )
+    config.evidence_dir = tmp_path
     monkeypatch.setattr(n, "BASE", tmp_path)
     monkeypatch.setattr(n, "account_guard", lambda c: None)
     monkeypatch.setattr(n, "environment", lambda c: {})
@@ -259,6 +260,7 @@ def test_rebuild_execute_rejects_changed_tfvars_before_apply(tmp_path, monkeypat
     }))
     config = SimpleNamespace(expected_account_id="275544662748",
                              aws_region="eu-west-1", cluster_name="lab")
+    config.evidence_dir = tmp_path
     monkeypatch.setattr(n, "BASE", tmp_path)
     monkeypatch.setattr(n, "account_guard", lambda c: None)
     calls = []

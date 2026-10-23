@@ -99,7 +99,7 @@ class NativeAdapter:
 
     def verify_plan(self, plan: Path, tfvars: str, kind: str) -> bool:
         """Revalidate plan checksum and current Terraform state without applying."""
-        from lifecycle import (checked_inputs, sha256_approved_file, sha256_file,
+        from lifecycle import (checked_inputs, sha256_approved_file,
                                plan_json, assert_plan_policy, environment, call, TF)
         data = json.loads(plan.read_text())
         if (data.get('kind') != kind
@@ -114,7 +114,7 @@ class NativeAdapter:
         if (not planned.is_absolute() or planned.is_symlink()
                 or not planned.is_file() or not planned.resolve().is_relative_to(self.root)):
             return False
-        if sha256_file(planned) != data.get('plan_sha256'):
+        if sha256_approved_file(planned) != data.get('plan_sha256'):
             return False
         state = json.loads(call(['terraform', f'-chdir={TF}', 'state', 'pull'],
                                 env=environment(self.config)))
