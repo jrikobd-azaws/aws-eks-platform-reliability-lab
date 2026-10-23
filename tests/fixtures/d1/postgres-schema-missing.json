@@ -4,5 +4,8 @@
   "impact": "registration unavailable",
   "evidence": [
     "Saved application log: UndefinedTable relation users does not exist; Alembic schema not initialised"
+  ],
+  "expected_signatures": [
+    "PG_SCHEMA_MISSING"
   ]
 }
