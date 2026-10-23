@@ -9,6 +9,8 @@ python3 scripts/diagnostics/labdiag.py coverage > /tmp/labdiag-coverage.json
 python3 scripts/diagnostics/labdiag.py inventory
 python3 scripts/diagnostics/labdiag.py create CASE-001 --symptom "registration failed UndefinedTable" --impact "sign-up unavailable" --component postgresql
 python3 scripts/diagnostics/labdiag.py evidence CASE-001 ./approved-redacted-events.log
+# After approved remediation (D1 does not execute it), attach verification evidence:
+python3 scripts/diagnostics/labdiag.py evidence CASE-001 ./approved-post-remediation-checks.log --purpose verification
 python3 scripts/diagnostics/labdiag.py investigate CASE-001
 python3 scripts/diagnostics/labdiag.py report CASE-001 --format markdown
 python3 scripts/diagnostics/labassist.py investigate CASE-001 --format chatgpt
@@ -50,7 +52,7 @@ A `D1_IMPLEMENTATION_REVIEW_READY` status means the offline toolkit is demonstra
 
 ### Incident closure
 
-`labdiag update ID --state closed` is **blocked** unless the current state is `verification`, an explicit verification review note was recorded using `update ID --state verification --note "..."`, and every referenced original evidence file is still present with its original SHA-256. Those conditions provide a minimum audit gate; they do not independently establish that the remediation actually worked. The operator is accountable for the verification note and should attach post-remediation evidence. Use `update ID --state closed --note "Reason for administrative closure"` for documented **administrative, unresolved** closure. Never interpret this path as resolution. `reopened` clears closure status.
+`labdiag update ID --state closed` is **blocked** unless the current state is `verification`, a distinct post-remediation artifact has been imported using `labdiag evidence ID ./approved-verification.log --purpose verification`, an explicit review note was recorded using `update ID --state verification --note "..."`, and every referenced original evidence file is still present with its original SHA-256. Those conditions provide a minimum audit gate; they do not independently establish that the remediation actually worked. The operator is accountable for the verification note and should attach post-remediation evidence. Use `update ID --state closed --note "Reason for administrative closure"` for documented **administrative, unresolved** closure. Never interpret this path as resolution. `reopened` clears closure status.
 
 ### Evidence integrity and prompts
 
