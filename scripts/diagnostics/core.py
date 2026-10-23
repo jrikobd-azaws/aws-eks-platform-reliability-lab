@@ -10,7 +10,12 @@ from pathlib import Path
 SCHEMA = 1
 MAX_BYTES = 1_000_000
 IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
-SECRET = re.compile(r"(?i)((?:password|secret|token|api[_-]?key|authorization|private[_-]?key)\s*[:=]\s*)([^\s,;]+)")
+SECRET = re.compile(r"(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|authorization|client_secret|private[_-]?key)\s*[:=]\s*[\"']?)([^\s,\"';]+)")
+BEARER = re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9_.~+/-]+={0,2}")
+URI_SECRET = re.compile(r"(?i)(\b(?:postgres(?:ql)?|mysql|redis|mongodb(?:\+srv)?)://[^:/@\s]+:)[^@\s/]+(@)")
+QUERY_SECRET = re.compile(r"(?i)([?&](?:password|token|secret|api_key)=)[^&#\s]+")
+AWS_KEY = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
+PEM = re.compile(r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----")
 SIGNATURES = (
     ("PG_SCHEMA_MISSING", r"UndefinedTable|relation .+ does not exist|alembic.*(?:missing|revision)", "postgresql",
      "Check migration version and schema inventory without modifying the database."),
@@ -45,11 +50,16 @@ def utcnow():
 
 def redact(value):
     if isinstance(value, dict):
-        return {k: ("[REDACTED]" if k.lower() in SENSITIVE_KEYS else redact(v)) for k, v in value.items()}
+        return {k: ("[REDACTED]" if any(x in k.lower().replace("-", "_") for x in SENSITIVE_KEYS) else redact(v)) for k, v in value.items()}
     if isinstance(value, list):
         return [redact(x) for x in value]
     if isinstance(value, str):
-        return SECRET.sub(r"\1[REDACTED]", value)
+        value = PEM.sub("[REDACTED PRIVATE KEY]", value)
+        value = URI_SECRET.sub(r"\1[REDACTED]\2", value)
+        value = BEARER.sub(r"\1[REDACTED]", value)
+        value = QUERY_SECRET.sub(r"\1[REDACTED]", value)
+        value = SECRET.sub(r"\1[REDACTED]", value)
+        return AWS_KEY.sub("[REDACTED AWS KEY]", value)
     return value
 
 def safe_root(path):
