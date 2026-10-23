@@ -24,7 +24,7 @@ class DiagnosticsOfflineTests(unittest.TestCase):
         self.evidence.write_text("OOMKilled exit code 137\n", encoding="utf-8")
 
     def command(self, path, *args):
-        return subprocess.run([sys.executable, str(path), *args, "--store", str(self.root)],
+        return subprocess.run([sys.executable, str(path), "--store", str(self.root), *args],
                               text=True, capture_output=True, timeout=10)
 
     def test_unknown_incident_supported(self):
