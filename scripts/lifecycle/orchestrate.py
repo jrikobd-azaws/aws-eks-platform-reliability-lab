@@ -205,14 +205,38 @@ class NativeAdapter:
         from recover_platform import validate_recovered_database
         return bool(validate_recovered_database(self.config))
 
-    def verify_final(self) -> None:
-        from foundation import CheckpointStore, CommandRunner
-        from recovery import RecoveryManager
-        manager = RecoveryManager(
-            self.config, CommandRunner(self.config),
-            CheckpointStore(self.config.evidence_dir / "python-resume-checkpoint.json"),
+    def stage3_ready(self) -> bool:
+        from foundation import CheckpointStore
+        from recover_platform import PlatformRecovery
+        manager = PlatformRecovery(
+            self.config,
+            CheckpointStore(
+                self.config.evidence_dir / "python-platform-recovery-checkpoint.json"
+            ),
         )
-        manager.verify_environment()
+        manager.verify_identity(update_kubeconfig=False)
+        return bool(manager.stage3_application_ready())
+
+    def restore_stage3(self) -> None:
+        from foundation import CheckpointStore
+        from recover_platform import PlatformRecovery
+        manager = PlatformRecovery(
+            self.config,
+            CheckpointStore(
+                self.config.evidence_dir / "python-platform-recovery-checkpoint.json"
+            ),
+        )
+        manager.verify_identity(update_kubeconfig=False)
+        manager.run_stage(
+            "stage3_application",
+            manager.stage3_application_ready,
+            manager.restore_stage3_application,
+        )
+        if not manager.stage3_application_ready():
+            raise LifecycleError("Stage 3 restoration not independently verified")
+
+    def verify_final(self) -> None:
+        """Read-only final verification; no implicit Stage 3 deployment."""
         self.verify_live_app()
 
     def restore_db(self, manifest: Path) -> None:
@@ -335,7 +359,7 @@ class OneCommandLifecycle:
             "shutdown": ("backup", "restore_test", "shutdown_plan",
                          "shutdown_certification", "shutdown_apply"),
             "restore": ("rebuild_plan", "rebuild_apply", "platform",
-                        "database", "application"),
+                        "database", "stage3_application", "application"),
         }
         if stage not in allowed[operation]:
             raise LifecycleError("Unknown reconciliation stage")
@@ -384,6 +408,9 @@ class OneCommandLifecycle:
         elif stage == "database":
             if not self.adapter.database_ready():
                 raise LifecycleError("Database not independently restored")
+        elif stage == "stage3_application":
+            if not self.adapter.database_ready() or not self.adapter.stage3_ready():
+                raise LifecycleError("Stage 3 not independently ready after database recovery")
         elif stage == "application":
             self.adapter.verify_live_app()
 
@@ -426,6 +453,15 @@ class OneCommandLifecycle:
             backup_info = self.adapter.verify_backup(manifest)
             digest = backup_info["database_sha256"]
             token = "RESTORE-TEST-" + self.config.expected_account_id + "-" + digest[:12]
+            if approvals.restore_test is None:
+                return {
+                    "operation": "shutdown",
+                    "phase": "awaiting_restore_test_approval",
+                    "manifest": str(manifest),
+                    "required_restore_test_approval": token,
+                    "backup_reused_on_continuation": True,
+                    "destruction_authorized": False,
+                }
             _require(approvals.restore_test, token, "restore-test")
             self._stage(state, "restore_test", lambda: self.adapter.restore_test(manifest, token),
                 verify=lambda: bool(self.adapter.verify_restore_test(manifest)))
@@ -505,6 +541,12 @@ class OneCommandLifecycle:
             # Actual emptiness is checked within native restore_database before pg_restore.
             self._stage(state, "database", lambda: self.adapter.restore_db(source),
                 verify=self.adapter.database_ready)
+            if not self.adapter.database_ready():
+                raise LifecycleError("Database must be ready before Stage 3 restoration")
+            _require(approvals.gitops, "GITOPS-" + self.config.expected_account_id,
+                     "selective Stage 3 GitOps recovery")
+            self._stage(state, "stage3_application", self.adapter.restore_stage3,
+                verify=self.adapter.stage3_ready)
             self._stage(state, "application", self.adapter.verify_final,
                 verify=lambda: (self.adapter.verify_live_app() is None))
             state["completed"] = True

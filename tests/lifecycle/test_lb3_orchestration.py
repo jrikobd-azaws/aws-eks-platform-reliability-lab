@@ -19,6 +19,7 @@ class FakeAdapter:
         self.infra = True
         self.db = False
         self.platform = False
+        self.stage3 = False
         self.app = False
         self.bad_source = False
 
@@ -115,6 +116,15 @@ class FakeAdapter:
     def restore_db(self, manifest):
         self.mark('database')
         self.db = True
+
+    def stage3_ready(self):
+        return self.stage3 and self.db and self.platform
+
+    def restore_stage3(self):
+        if not self.db or not self.platform:
+            raise LifecycleError('Stage 3 requires accepted database and platform')
+        self.mark('stage3')
+        self.stage3 = True
 
     def verify_final(self):
         self.mark('final')
@@ -411,3 +421,122 @@ def test_reconciliation_challenge_invalidated_after_checkpoint_change(harness):
     with pytest.raises(LifecycleError, match='authorisation required'):
         ctl.reconcile('restore', stage='database', approval=challenge)
     assert ctl._load()['stages']['database']['status'] == 'running'
+
+
+def test_backup_continuation_does_not_repeat_backup(harness):
+    ctl, adapter, _ = harness
+    first = ctl.shutdown(
+        phase='prepare', tfvars='reviewed',
+        approvals=OperatorApprovals(backup='BACKUP-275544662748')
+    )
+    assert first['phase'] == 'awaiting_restore_test_approval'
+    assert first['destruction_authorized'] is False
+    assert adapter.calls.count('backup') == 1
+    assert 'restore_test' not in adapter.calls
+
+    second = ctl.shutdown(
+        phase='prepare', tfvars='reviewed',
+        approvals=OperatorApprovals(
+            backup='BACKUP-275544662748',
+            restore_test=first['required_restore_test_approval']
+        )
+    )
+    assert second['phase'] == 'prepared'
+    assert second['manifest'] == first['manifest']
+    assert adapter.calls.count('backup') == 1
+    assert adapter.calls.count('restore_test') == 1
+    assert 'apply' not in adapter.calls
+
+
+def test_wrong_continuation_token_does_not_repeat_backup(harness):
+    ctl, adapter, _ = harness
+    ctl.shutdown(
+        phase='prepare', tfvars='reviewed',
+        approvals=OperatorApprovals(backup='BACKUP-275544662748')
+    )
+    with pytest.raises(LifecycleError, match='restore-test authorisation'):
+        ctl.shutdown(
+            phase='prepare', tfvars='reviewed',
+            approvals=OperatorApprovals(
+                backup='BACKUP-275544662748',
+                restore_test='INVALID'
+            )
+        )
+    assert adapter.calls.count('backup') == 1
+    assert 'restore_test' not in adapter.calls
+
+
+def test_restore_order_database_stage3_application(harness):
+    manifest, result = prepare_restore(harness)
+    ctl, adapter, _ = harness
+    approvals = OperatorApprovals(
+        rebuild='REBUILD-275544662748',
+        gitops='GITOPS-275544662748',
+        database='RESTORE-275544662748'
+    )
+    assert ctl.restore(
+        phase='execute', tfvars='reviewed',
+        manifest=str(manifest), report=result['plan'],
+        approvals=approvals
+    )['verified']
+
+    actions = adapter.calls
+    assert actions.index('platform') < actions.index('database')
+    assert actions.index('database') < actions.index('stage3')
+    assert actions.index('stage3') < actions.index('final')
+    assert ctl._load()['stages']['stage3_application']['status'] == 'passed'
+
+    ctl.restore(
+        phase='execute', tfvars='reviewed',
+        manifest=str(manifest), report=result['plan'],
+        approvals=approvals
+    )
+    assert adapter.calls.count('stage3') == 1
+
+
+def test_stage3_failure_prevents_final_acceptance(harness):
+    manifest, result = prepare_restore(harness)
+    ctl, adapter, _ = harness
+    adapter.fail = 'stage3'
+    with pytest.raises(LifecycleError, match='stage3 deliberately failed'):
+        ctl.restore(
+            phase='execute', tfvars='reviewed',
+            manifest=str(manifest), report=result['plan'],
+            approvals=OperatorApprovals(
+                rebuild='REBUILD-275544662748',
+                gitops='GITOPS-275544662748',
+                database='RESTORE-275544662748'
+            )
+        )
+    assert 'final' not in adapter.calls
+    assert ctl._load().get('completed') is not True
+
+
+def test_stage3_reconciliation_requires_live_readiness(harness):
+    ctl, adapter, _ = harness
+    state = ctl._state('restore')
+    state['stages']['stage3_application'] = {
+        'status': 'failed', 'time': 'interrupted'
+    }
+    ctl._save(state)
+    token = ctl.preflight('restore')[
+        'reconciliation_challenges'
+    ]['stage3_application']
+
+    with pytest.raises(LifecycleError, match='Stage 3 not independently ready'):
+        ctl.reconcile(
+            'restore', stage='stage3_application', approval=token
+        )
+
+    assert ctl._load()['stages']['stage3_application']['status'] == 'failed'
+
+    adapter.platform = True
+    adapter.db = True
+    adapter.stage3 = True
+
+    result = ctl.reconcile(
+        'restore', stage='stage3_application', approval=token
+    )
+    assert result['action_replayed'] is False
+    assert ctl._load()['stages']['stage3_application']['status'] == 'passed'
+    assert 'stage3' not in adapter.calls
