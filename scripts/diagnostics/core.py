@@ -199,14 +199,16 @@ def transition(record, requested, note=None):
     record["updated_utc"] = utcnow()
     return record
 
-def diagnose(record):
+def diagnose(record, *, offline_fixture=False):
     fragments = [str(record.get("symptoms", ""))]
     fragments += [str(e.get("text", "")) for e in record.get("evidence", [])]
-    evidence_checks = verify_evidence(record)
+    evidence_checks = ([{"status": "synthetic_unverified"} for _ in record.get("evidence", [])]
+                       if offline_fixture else verify_evidence(record))
     record["evidence_verification"] = evidence_checks
+    record["synthetic_replay"] = bool(offline_fixture)
     fragments = [str(record.get("symptoms", ""))]
     fragments += [str(item.get("text", "")) for item, result in zip(record.get("evidence", []), evidence_checks)
-                  if result["status"] == "verified"]
+                  if result["status"] == "verified" or offline_fixture]
     text = "\n".join(fragments)
     hits = []
     for ident, pattern, domain, test in SIGNATURES:
@@ -218,7 +220,7 @@ def diagnose(record):
     from collectors import collect_saved_json
     structured = []
     for evidence, checked in zip(record.get("evidence", []), evidence_checks):
-        if checked["status"] == "verified":
+        if checked["status"] == "verified" or offline_fixture:
             structured += collect_saved_json(evidence.get("text", ""))
     structured += collect_saved_json(str(record.get("symptoms", "")))
     record["signature_matches"] = hits
