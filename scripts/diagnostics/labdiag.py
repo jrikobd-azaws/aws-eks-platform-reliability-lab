@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 from core import safe_root, create, load, update, add_evidence, diagnose, markdown, redact, ALLOWED, utcnow
+from domain_rules import scenario_rules
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="labdiag", description="Offline evidence-grounded incident diagnostics")
@@ -27,10 +28,11 @@ def main(argv=None):
         rows = re.findall(r"^\|\s*((?:K8S|EKS|TF|HELM|ARGO|INC)-\d+)\s*\|\s*([^|]+)\|\s*(\d)\s*\|\s*(full|compact)\s*\|\s*(planned|in-progress|done)\s*\|", catalogue, re.M)
         if len(rows) != 43 or len({r[0] for r in rows}) != 43:
             raise ValueError("scenario index must contain exactly 43 unique entries")
+        rule_map = scenario_rules()
         print(json.dumps({"schema": 1, "scenario_count": len(rows), "coverage": [
             {"id": ident, "name": name.strip(), "wave": int(wave), "scenario_status": status,
-             "registered": True, "collector_available": False, "detection_rule_available": False,
-             "offline_regression_passed": False, "live_validated": False, "documentation_published": False}
+             "registered": True, "collector_available": False, "detection_rule_available": ident in rule_map,
+             "rules": rule_map.get(ident, []), "offline_regression_passed": False, "live_validated": False, "documentation_published": False}
             for ident, name, wave, _, status in rows]}, indent=2))
         return 0
     if args.command == "replay":
@@ -38,12 +40,23 @@ def main(argv=None):
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 1_000_000:
             raise ValueError("invalid fixture")
         obj = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(obj.get("evidence", []), list) or any(not isinstance(x, (str, dict)) for x in obj.get("evidence", [])):
+            raise ValueError("fixture evidence must consist of strings or objects")
         if not isinstance(obj.get("evidence", []), list):
             raise ValueError("fixture evidence must be a list")
         record = {"schema": 1, "id": obj["id"], "state": "investigating",
                   "symptoms": str(obj["symptoms"]), "impact": str(obj.get("impact", "unknown")),
-                  "evidence": [{"text": str(x)} for x in obj["evidence"]]}
-        print(json.dumps(redact(diagnose(record)), indent=2))
+                  "evidence": [{"text": json.dumps(x, sort_keys=True) if isinstance(x, dict) else x} for x in obj["evidence"]]}
+        result = redact(diagnose(record))
+        expected = obj.get("expected_signatures")
+        if expected is not None:
+            if not isinstance(expected, list) or any(not isinstance(x, str) for x in expected):
+                raise ValueError("expected_signatures must be a list of strings")
+            detected = {h["id"] for h in result["signature_matches"]}
+            missing = set(expected) - detected
+            if missing:
+                raise ValueError("replay expectation failed: " + ", ".join(sorted(missing)))
+        print(json.dumps(result, indent=2))
         return 0
     root = safe_root(args.store)
     if args.command == "create":
