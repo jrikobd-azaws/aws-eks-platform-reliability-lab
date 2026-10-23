@@ -60,7 +60,7 @@ def main(argv=None):
         record = {"schema": 1, "id": obj["id"], "state": "investigating",
                   "symptoms": str(obj["symptoms"]), "impact": str(obj.get("impact", "unknown")),
                   "evidence": [{"text": json.dumps(x, sort_keys=True) if isinstance(x, dict) else x} for x in obj["evidence"]]}
-        result = redact(diagnose(record))
+        result = redact(diagnose(record, offline_fixture=True))
         expected = obj.get("expected_signatures")
         if expected is not None:
             if not isinstance(expected, list) or any(not isinstance(x, str) for x in expected):
