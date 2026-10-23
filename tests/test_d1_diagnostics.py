@@ -231,5 +231,15 @@ class DiagnosticsOfflineTests(unittest.TestCase):
         self.assertTrue(investigated["correlations"])
         self.assertEqual(investigated["correlations"][0]["confidence"], "unverified")
 
+    def test_inventory_preserves_classification_and_ids(self):
+        result = subprocess.run([sys.executable, str(DIAG), "inventory"],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["count"], 18)
+        self.assertEqual(sum(x["source_type"] == "owner_report" for x in data["incidents"]), 11)
+        self.assertEqual(sum(x["source_type"] == "source_history" for x in data["incidents"]), 7)
+        self.assertFalse(any(x["operational_event_verified"] for x in data["incidents"]))
+
 if __name__ == "__main__":
     unittest.main()
