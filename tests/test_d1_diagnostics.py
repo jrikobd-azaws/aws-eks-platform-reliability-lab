@@ -310,6 +310,10 @@ class DiagnosticsOfflineTests(unittest.TestCase):
     def test_resolved_closure_requires_review_note_and_verified_evidence(self):
         record = core.create(self.root, "RESOLUTION", "transient incident", "", "")
         core.add_evidence(self.root, record, self.evidence)
+        verified_path = Path(self.tmp.name) / "post-remediation-verification.log"
+        verified_path.write_text("Post-remediation checks recorded: readiness=pass, user-flow=pass")
+        core.add_evidence(self.root, core.load(self.root, "RESOLUTION"), verified_path,
+                          purpose="verification")
         result = self.command(DIAG, "update", "RESOLUTION", "--state", "verification")
         self.assertEqual(result.returncode, 0, result.stderr)
         blocked = self.command(DIAG, "update", "RESOLUTION", "--state", "closed")
@@ -397,6 +401,23 @@ class DiagnosticsOfflineTests(unittest.TestCase):
         result = self.command(ASSIST, "investigate", "ANY", "--profile", "deep")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unrecognized arguments", result.stderr)
+
+    def test_diagnostic_only_evidence_cannot_close_resolved(self):
+        rec = core.create(self.root, "DIAGNOSTIC-ONLY", "issue", "", "")
+        core.add_evidence(self.root, rec, self.evidence)
+        first = self.command(DIAG, "update", "DIAGNOSTIC-ONLY", "--state", "verification",
+                             "--note", "I reviewed the incident log")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        result = self.command(DIAG, "update", "DIAGNOSTIC-ONLY", "--state", "closed")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("resolved closure requires", result.stderr)
+
+    def test_cli_verification_purpose(self):
+        core.create(self.root, "PURPOSE", "issue", "", "")
+        result = self.command(DIAG, "evidence", "PURPOSE", str(self.evidence),
+                              "--purpose", "verification")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(core.load(self.root, "PURPOSE")["evidence"][0]["purpose"], "verification")
 
 if __name__ == "__main__":
     unittest.main()
