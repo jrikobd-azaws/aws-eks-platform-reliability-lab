@@ -493,7 +493,10 @@ def main():
     parser.add_argument('--confirm', help='Explicit account-specific approval')
 
     # LB3 safe-by-default command family. All execution approvals are separate.
-    parser.add_argument('--lb3-phase', choices=('preflight', 'prepare', 'execute'), default='preflight')
+    parser.add_argument('--lb3-phase', choices=('preflight', 'prepare', 'execute', 'reconcile'), default='preflight')
+    parser.add_argument('--reconcile-stage', help='Interrupted LB3 stage; no action replay')
+    parser.add_argument('--reconcile-evidence', help='Private manifest or plan for reconciliation')
+    parser.add_argument('--reconcile-approval', help='Checkpoint-bound independent reconciliation approval')
     parser.add_argument('--manifest', help='Explicit approved recovery manifest for restore')
     parser.add_argument('--backup-approval', help='Explicit live backup authorisation')
     parser.add_argument('--restore-test-approval', help='Explicit isolated restore-test authorisation')
@@ -593,7 +596,13 @@ def main():
         )
         if args.plan and args.lb3_phase != 'preflight':
             raise RuntimeError('--plan cannot bypass LB3 phase boundaries')
-        if args.command == "shutdown":
+        if args.lb3_phase == "reconcile":
+            result = coordinator.reconcile(
+                args.command, stage=args.reconcile_stage,
+                approval=args.reconcile_approval,
+                evidence=args.reconcile_evidence, tfvars=args.tfvars,
+            )
+        elif args.command == "shutdown":
             result = coordinator.shutdown(
                 phase=args.lb3_phase, tfvars=args.tfvars,
                 report=args.report, approvals=approvals,

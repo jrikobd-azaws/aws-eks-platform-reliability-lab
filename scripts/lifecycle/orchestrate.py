@@ -306,13 +306,109 @@ class OneCommandLifecycle:
         data["operation"] = operation
         return data
 
+    def _reconciliation_challenge(self, operation: str, stage: str, entry: dict) -> str:
+        """Bind explicit operator intent to the exact interrupted stage record."""
+        identity = json.dumps(
+            {"operation": operation, "stage": stage, "entry": entry},
+            sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        digest = hashlib.sha256(identity).hexdigest()[:12]
+        return (
+            f"RECONCILE-{self.config.expected_account_id}-"
+            f"{operation.upper()}-{stage.upper()}-{digest}"
+        )
+
+    def reconcile(self, operation: str, *, stage: str,
+                  approval: str | None, evidence: str | None = None,
+                  tfvars: str | None = None) -> dict:
+        """Independently verify an interrupted stage; NEVER replay its action.
+
+        Reconciliation is one-way: a failed/running stage can become passed
+        only after stage-specific evidence and current-state checks succeed.
+        A failed verification leaves the original checkpoint untouched.
+        """
+        state = self._state(operation)
+        record = state["stages"].get(stage)
+        if not isinstance(record, dict) or record.get("status") not in ("running", "failed"):
+            raise LifecycleError("Reconciliation requires an interrupted stage")
+        allowed = {
+            "shutdown": ("backup", "restore_test", "shutdown_plan",
+                         "shutdown_certification", "shutdown_apply"),
+            "restore": ("rebuild_plan", "rebuild_apply", "platform",
+                        "database", "application"),
+        }
+        if stage not in allowed[operation]:
+            raise LifecycleError("Unknown reconciliation stage")
+        _require(approval, self._reconciliation_challenge(operation, stage, record),
+                 "stage reconciliation")
+        self.adapter.check_identity()
+
+        artifact = None
+        if stage in ("backup", "shutdown_plan", "rebuild_plan"):
+            if not evidence:
+                raise LifecycleError("Independent private evidence path required")
+            artifact = _private_file(self.root, evidence, "reconciliation evidence")
+            if stage == "backup":
+                if not self.adapter.verify_backup(artifact):
+                    raise LifecycleError("Backup reconciliation failed")
+            else:
+                if not tfvars:
+                    raise LifecycleError("Reviewed tfvars required for plan reconciliation")
+                kind = "shutdown" if stage == "shutdown_plan" else "rebuild"
+                if not self.adapter.verify_plan(artifact, tfvars, kind):
+                    raise LifecycleError("Plan reconciliation failed")
+        elif stage == "restore_test":
+            backup = state["stages"].get("backup", {})
+            manifest = _private_file(self.root, backup.get("result") or "",
+                                     "completed backup manifest")
+            if not self.adapter.verify_backup(manifest):
+                raise LifecycleError("Backup evidence invalid")
+            if not self.adapter.verify_restore_test(manifest):
+                raise LifecycleError("Restore-test evidence invalid")
+        elif stage == "shutdown_certification":
+            plan = _private_file(self.root, state.get("prepared_plan") or "",
+                                 "prepared shutdown plan")
+            if not self.adapter.verify_shutdown_certification(plan):
+                raise LifecycleError("Shutdown certification invalid")
+        elif stage == "shutdown_apply":
+            plan = _private_file(self.root, state.get("prepared_plan") or "",
+                                 "prepared shutdown plan")
+            if not self.adapter.verify_shutdown_complete(plan):
+                raise LifecycleError("Shutdown is not independently complete")
+        elif stage == "rebuild_apply":
+            if not self.adapter.infrastructure_ready():
+                raise LifecycleError("Rebuild not independently complete")
+        elif stage == "platform":
+            if not self.adapter.platform_ready():
+                raise LifecycleError("Platform not independently ready")
+        elif stage == "database":
+            if not self.adapter.database_ready():
+                raise LifecycleError("Database not independently restored")
+        elif stage == "application":
+            self.adapter.verify_live_app()
+
+        # Only independent verification can promote a running/failed entry.
+        state["stages"][stage] = {
+            "status": "passed", "time": utc_now(),
+            "result": str(artifact) if artifact else record.get("result"),
+            "reconciled": True, "reconciled_from": record["status"],
+        }
+        self._save(state)
+        return {"operation": operation, "phase": "reconciled", "stage": stage,
+                "status": "passed", "action_replayed": False}
+
     def preflight(self, operation: str) -> dict:
         """Offline-only: never construct a native adapter or call AWS."""
         self._select(operation)
         state = self._load()
+        interrupted = {
+            stage: self._reconciliation_challenge(operation, stage, entry)
+            for stage, entry in state.get("stages", {}).items()
+            if isinstance(entry, dict) and entry.get("status") in ("running", "failed")
+        }
         return {"operation": operation, "mode": "preflight", "record": str(self.record),
                 "current_operation": state.get("operation"), "stages": state.get("stages", {}),
-                "live_execution": False}
+                "reconciliation_challenges": interrupted, "live_execution": False}
 
     def shutdown(self, *, phase: str, tfvars: str | None = None, report: str | None = None,
                  approvals: OperatorApprovals = OperatorApprovals()) -> dict:

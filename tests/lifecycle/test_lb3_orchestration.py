@@ -272,3 +272,142 @@ def test_checkpoint_invalid_permissions_rejected(harness):
     ctl.record.chmod(0o644)
     with pytest.raises(LifecycleError, match='Unsafe LB3'):
         ctl.preflight('shutdown')
+
+
+@pytest.mark.parametrize('stage,operation', [
+    ('backup', 'shutdown'), ('restore_test', 'shutdown'),
+    ('shutdown_plan', 'shutdown'), ('shutdown_certification', 'shutdown'),
+    ('shutdown_apply', 'shutdown'), ('rebuild_plan', 'restore'),
+    ('rebuild_apply', 'restore'), ('platform', 'restore'),
+    ('database', 'restore'), ('application', 'restore'),
+])
+def test_reconcile_interrupted_stages_fail_closed_without_approval(harness, stage, operation):
+    ctl, adapter, _ = harness
+    state = ctl._state(operation)
+    state['stages'][stage] = {'status': 'running', 'time': 'before interruption'}
+    ctl._save(state)
+    before = dict(ctl._load()['stages'][stage])
+    with pytest.raises(LifecycleError, match='authorisation required'):
+        ctl.reconcile(operation, stage=stage, approval=None)
+    assert ctl._load()['stages'][stage] == before
+    assert adapter.calls == []
+
+
+def test_reconcile_backup_from_private_evidence_does_not_replay(harness):
+    ctl, adapter, root = harness
+    ctl._select('shutdown')
+    state = ctl._state('shutdown')
+    state['stages']['backup'] = {'status': 'failed', 'time': 'interrupted'}
+    ctl._save(state)
+    artifact = root / 'backup.json'
+    artifact.write_text('{}')
+    artifact.chmod(0o600)
+    challenge = ctl.preflight('shutdown')['reconciliation_challenges']['backup']
+    result = ctl.reconcile('shutdown', stage='backup', approval=challenge, evidence=str(artifact))
+    assert result['action_replayed'] is False
+    assert ctl._load()['stages']['backup']['status'] == 'passed'
+    assert 'backup' not in adapter.calls
+    assert 'verify_backup' in adapter.calls
+
+
+def test_reconcile_backup_rejects_wrong_source_and_preserves_failure(harness):
+    ctl, adapter, root = harness
+    state = ctl._state('shutdown')
+    state['stages']['backup'] = {'status': 'failed'}
+    ctl._save(state)
+    artifact = root / 'backup.json'
+    artifact.write_text('{}')
+    artifact.chmod(0o600)
+    adapter.bad_source = True
+    challenge = ctl.preflight('shutdown')['reconciliation_challenges']['backup']
+    with pytest.raises(LifecycleError, match='source revision mismatch'):
+        ctl.reconcile('shutdown', stage='backup', approval=challenge, evidence=str(artifact))
+    assert ctl._load()['stages']['backup']['status'] == 'failed'
+
+
+def test_reconcile_refuses_symlink_evidence(harness):
+    ctl, adapter, root = harness
+    state = ctl._state('shutdown')
+    state['stages']['backup'] = {'status': 'failed'}
+    ctl._save(state)
+    artifact = root / 'backup.json'
+    artifact.write_text('{}')
+    artifact.chmod(0o600)
+    link = root / 'link.json'
+    link.symlink_to(artifact)
+    challenge = ctl.preflight('shutdown')['reconciliation_challenges']['backup']
+    with pytest.raises(LifecycleError, match='nonsymlink'):
+        ctl.reconcile('shutdown', stage='backup', approval=challenge, evidence=str(link))
+    assert ctl._load()['stages']['backup']['status'] == 'failed'
+
+
+def test_reconcile_successful_shutdown_apply_does_not_reapply(harness):
+    ctl, adapter, root = harness
+    state = ctl._state('shutdown')
+    plan = root / 'plan.json'
+    plan.write_text('{}')
+    plan.chmod(0o600)
+    state['prepared_plan'] = str(plan)
+    state['stages']['shutdown_apply'] = {'status': 'running'}
+    ctl._save(state)
+    adapter.infra = False
+    challenge = ctl.preflight('shutdown')['reconciliation_challenges']['shutdown_apply']
+    result = ctl.reconcile('shutdown', stage='shutdown_apply', approval=challenge)
+    assert result['action_replayed'] is False
+    assert 'apply' not in adapter.calls
+    assert ctl._load()['stages']['shutdown_apply']['reconciled'] is True
+
+
+def test_reconcile_shutdown_apply_rejects_live_targets_remaining(harness):
+    ctl, adapter, root = harness
+    state = ctl._state('shutdown')
+    plan = root / 'plan.json'
+    plan.write_text('{}')
+    plan.chmod(0o600)
+    state['prepared_plan'] = str(plan)
+    state['stages']['shutdown_apply'] = {'status': 'failed'}
+    ctl._save(state)
+    challenge = ctl.preflight('shutdown')['reconciliation_challenges']['shutdown_apply']
+    with pytest.raises(LifecycleError, match='not independently complete'):
+        ctl.reconcile('shutdown', stage='shutdown_apply', approval=challenge)
+    assert 'apply' not in adapter.calls
+    assert ctl._load()['stages']['shutdown_apply']['status'] == 'failed'
+
+
+def test_reconcile_nonempty_or_incomplete_database_blocks_promotion(harness):
+    ctl, adapter, root = harness
+    state = ctl._state('restore')
+    state['stages']['database'] = {'status': 'failed'}
+    ctl._save(state)
+    challenge = ctl.preflight('restore')['reconciliation_challenges']['database']
+    with pytest.raises(LifecycleError, match='not independently restored'):
+        ctl.reconcile('restore', stage='database', approval=challenge)
+    assert 'database' not in adapter.calls
+    assert ctl._load()['stages']['database']['status'] == 'failed'
+
+
+def test_reconcile_database_passes_only_if_current_database_ready(harness):
+    ctl, adapter, root = harness
+    state = ctl._state('restore')
+    state['stages']['database'] = {'status': 'running'}
+    ctl._save(state)
+    adapter.db = True
+    challenge = ctl.preflight('restore')['reconciliation_challenges']['database']
+    result = ctl.reconcile('restore', stage='database', approval=challenge)
+    assert result['action_replayed'] is False
+    assert 'database' not in adapter.calls
+    assert ctl._load()['stages']['database']['status'] == 'passed'
+
+
+def test_reconciliation_challenge_invalidated_after_checkpoint_change(harness):
+    ctl, adapter, root = harness
+    state = ctl._state('restore')
+    state['stages']['database'] = {'status': 'running', 'time': 'old'}
+    ctl._save(state)
+    challenge = ctl.preflight('restore')['reconciliation_challenges']['database']
+    state['stages']['database']['time'] = 'new'
+    ctl._save(state)
+    adapter.db = True
+    with pytest.raises(LifecycleError, match='authorisation required'):
+        ctl.reconcile('restore', stage='database', approval=challenge)
+    assert ctl._load()['stages']['database']['status'] == 'running'
