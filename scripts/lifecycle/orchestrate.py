@@ -450,6 +450,86 @@ class OneCommandLifecycle:
         return {"operation": operation, "phase": "reconciled", "stage": stage,
                 "status": "passed", "action_replayed": False}
 
+    def failed_backup_restart_approval(self) -> str | None:
+        """Return a token bound to the exact failed backup state.
+
+        Offline only; no backup, cloud or database operation.
+        """
+        self._select("shutdown")
+        state = self._load()
+        stages = state.get("stages", {})
+        if (
+            state.get("operation") != "shutdown"
+            or set(stages) != {"backup"}
+            or not isinstance(stages.get("backup"), dict)
+            or stages["backup"].get("status") != "failed"
+        ):
+            return None
+
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                state, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()[:12]
+
+        return (
+            "RESTART-BACKUP-"
+            + self.config.expected_account_id
+            + "-" + fingerprint
+        )
+
+    def restart_failed_backup(self, *, approval: str | None) -> dict:
+        """Archive a failed backup attempt without falsely accepting it.
+
+        This operation never retries the dump and never alters
+        historical backup artifacts. It only rolls the active
+        shutdown checkpoint after explicit fingerprint-bound approval.
+        """
+        token = self.failed_backup_restart_approval()
+        if token is None:
+            raise LifecycleError(
+                "No eligible failed-only backup checkpoint"
+            )
+        _require(approval, token, "failed backup restart")
+
+        state = self._load()
+        fingerprint = token.rsplit("-", 1)[-1]
+        archive = self.root / (
+            "lb3-shutdown-failed-backup-" + fingerprint + ".json"
+        )
+
+        if archive.exists() or archive.is_symlink():
+            raise LifecycleError(
+                "Failed backup archival checkpoint already exists"
+            )
+
+        # Archive first. If writing the new active checkpoint
+        # fails, original failure evidence remains available.
+        atomic_json_write(archive, state)
+
+        archived = self._load()
+        if archived != state:
+            raise LifecycleError(
+                "Failed checkpoint changed during archival"
+            )
+
+        self._save({
+            "schema": 1,
+            "operation": None,
+            "stages": {},
+            "previous_failed_checkpoint": str(archive),
+        })
+
+        return {
+            "operation": "shutdown",
+            "phase": "failed_backup_archived",
+            "historical_checkpoint": str(archive),
+            "previous_backup_status": "failed",
+            "new_backup_status": "pending",
+            "backup_executed": False,
+            "destruction_authorized": False,
+        }
+
     def preflight(self, operation: str) -> dict:
         """Offline-only: never construct a native adapter or call AWS."""
         self._select(operation)
@@ -459,9 +539,17 @@ class OneCommandLifecycle:
             for stage, entry in state.get("stages", {}).items()
             if isinstance(entry, dict) and entry.get("status") in ("running", "failed")
         }
-        return {"operation": operation, "mode": "preflight", "record": str(self.record),
-                "current_operation": state.get("operation"), "stages": state.get("stages", {}),
-                "reconciliation_challenges": interrupted, "live_execution": False}
+        result = {"operation": operation, "mode": "preflight",
+                  "record": str(self.record),
+                  "current_operation": state.get("operation"),
+                  "stages": state.get("stages", {}),
+                  "reconciliation_challenges": interrupted,
+                  "live_execution": False}
+        if operation == "shutdown":
+            result["failed_backup_restart_approval"] = (
+                self.failed_backup_restart_approval()
+            )
+        return result
 
     def shutdown(self, *, phase: str, tfvars: str | None = None, report: str | None = None,
                  approvals: OperatorApprovals = OperatorApprovals()) -> dict:

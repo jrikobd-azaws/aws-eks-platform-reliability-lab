@@ -160,8 +160,18 @@ def validate_path_boundary(path: Path, allowed_roots: tuple[Path, ...] = ALLOWED
     return resolved
 
 
-def sha256_file(path: Path) -> str:
-    validated_path = validate_path_boundary(Path(path), description="Target file")
+def sha256_file(
+    path: Path, *,
+    allowed_roots: tuple[Path, ...] | None = None,
+) -> str:
+    # The default security boundary is unchanged. A caller may
+    # provide only its independently approved evidence boundary.
+    roots = ALLOWED_FILE_BOUNDARIES if allowed_roots is None else tuple(
+        Path(root).resolve() for root in allowed_roots
+    )
+    validated_path = validate_path_boundary(
+        Path(path), allowed_roots=roots, description="Target file"
+    )
     digest = hashlib.sha256()
 
     with validated_path.open("rb") as stream:
@@ -771,7 +781,9 @@ def backup(config):
     encrypted=call(['age','-r',recipient],data=archive)
     decrypted=call(['age','-d','-i',str(key)],data=encrypted)
     if decrypted!=archive: raise LifecycleError('Encrypted archive verification failed')
-    dest=fresh_dir('native-backup')
+    # Use the configured authoritative private evidence directory.
+    # Do not create a competing recovery point under source checkout.
+    dest=_fresh_certification_dir(config, 'native-backup')
     file=dest/'database.dump.age'; file.write_bytes(encrypted); file.chmod(0o600)
     # Preserve source checkpoint without secrets or local runtime state.
     source=dest/'source.tar.gz'
@@ -780,8 +792,12 @@ def backup(config):
             t.add(ROOT/part,arcname=part,filter=lambda x: None if any(k in x.name for k in ('.terraform/','.private-evidence/','__pycache__/','.tfstate','.env')) else x)
     report={'created_utc':utc_now(),'account':config.expected_account_id,'cluster':config.cluster_name,
         'rds_endpoint':host,'rds_master_secret_arn':values['rds_master_secret_arn'],
-        'database':db,'database_backup':str(file),'database_sha256':sha256_file(file),
-        'source_archive':str(source),'source_sha256':sha256_file(source),
+        'database':db,'database_backup':str(file),
+        'database_sha256':sha256_file(
+            file, allowed_roots=(config.evidence_dir.resolve(),)),
+        'source_archive':str(source),
+        'source_sha256':sha256_file(
+            source, allowed_roots=(config.evidence_dir.resolve(),)),
         'source_revision':source_revision,'restore_tested':False}
     atomic_json_write(dest/'recovery-manifest.json',report)
     print('PASS: Encrypted backup and source checkpoint created and verified')
