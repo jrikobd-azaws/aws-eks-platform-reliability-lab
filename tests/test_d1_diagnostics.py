@@ -225,5 +225,11 @@ class DiagnosticsOfflineTests(unittest.TestCase):
         core.create(self.root, "PERMISSIONS", "unknown", "", "")
         self.assertEqual((self.root / "PERMISSIONS.json").stat().st_mode & 0o777, 0o600)
 
+    def test_cross_layer_correlation_remains_unverified(self):
+        record = core.create(self.root, "CROSS", "OutOfSync and ImagePullBackOff", "", "gitops")
+        investigated = core.diagnose(record)
+        self.assertTrue(investigated["correlations"])
+        self.assertEqual(investigated["correlations"][0]["confidence"], "unverified")
+
 if __name__ == "__main__":
     unittest.main()
