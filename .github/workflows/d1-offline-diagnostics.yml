@@ -1,0 +1,26 @@
+name: D1 Offline Diagnostics
+on:
+  push:
+    branches:
+      - feature/d1-offline-diagnostics
+  pull_request:
+    paths:
+      - 'scripts/diagnostics/**'
+      - 'tests/test_d1_diagnostics.py'
+      - 'docs/diagnostics/**'
+      - '.github/workflows/d1-offline-diagnostics.yml'
+permissions:
+  contents: read
+jobs:
+  offline-diagnostics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify Python syntax
+        run: python -m compileall -q scripts/diagnostics tests/test_d1_diagnostics.py
+      - name: Offline D1 tests
+        run: python -m unittest discover -s tests -p 'test_d1_diagnostics.py' -v
